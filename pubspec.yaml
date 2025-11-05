@@ -16,6 +16,9 @@ dependencies:
   google_fonts: ^6.1.0
   path_provider: ^2.1.4
   provider: ^6.1.2
+  firebase_core: ^3.6.0
+  cloud_firestore: ^5.4.4
+  supabase_flutter: ^2.10.3
 
 dev_dependencies:
   flutter_test:

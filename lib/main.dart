@@ -1,2273 +1,1405 @@
+// PART-1 ─────────────────────────────────────────────────────────────────────
+// Bosanski-TR (tek dosya) — 7 sekmeli, Supabase ile
+// Not: pubspec.yaml -> supabase_flutter: ^2.5.0
+
 import 'dart:math';
 import 'package:flutter/material.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+import 'dart:async'; // <-- debounce için
 
-void main() {
+// ── Supabase ayarları (DEĞİŞTİR)
+const SUPABASE_URL = 'https://zrgxjsagacmkkgkqhlig.supabase.co';
+const SUPABASE_ANON_KEY = 'sb_publishable_8mws0LUrHJod5_4qyAY1gw_fWzrMkAv';
+
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  runApp(const MyApp());
+  await Supabase.initialize(url: SUPABASE_URL, anonKey: SUPABASE_ANON_KEY);
+  runApp(const BosanskiTRApp());
 }
 
-/// ------------------------------------------------------------
-/// DATA MODELLERİ
-/// ------------------------------------------------------------
-
-/// Kelime deposu (Kelime Öğren sekmesi)
-/// tur: isim / fiil / sıfat / zarf / ifade
-/// cinsiyet: m / f / n
-class KelimeEntry {
-  final String bos;
-  final String tr;
-  final String tur;
-  final String? cinsiyet;
-  final String? ornek;
-
-  KelimeEntry({
+// ── Modeller
+class Word {
+  final String bos, tr, tur, gender, example;
+  Word({
     required this.bos,
     required this.tr,
-    required this.tur,
-    this.cinsiyet,
-    this.ornek,
+    required this.tur,      // isim/fiil/sıfat/zarf/ifade
+    required this.gender,   // m/f/n
+    required this.example,
   });
+  Map<String, dynamic> toMap() => {
+    'bos': bos, 'tr': tr, 'tur': tur, 'gender': gender, 'example': example,
+  };
+  static Word fromMap(Map<String,dynamic> m) => Word(
+    bos: (m['bos']??'').toString(),
+    tr: (m['tr']??'').toString(),
+    tur: (m['tur']??'').toString(),
+    gender: (m['gender']??'').toString(),
+    example: (m['example']??'').toString(),
+  );
 }
 
-/// Çoktan seçmeli soru tipleri
-enum QuizMode {
-  bsToTr,      // Ezber Yap: Boşnakça -> Türkçe
-  trToBs,      // Ezber Yap: Türkçe -> Boşnakça
-  soruZarfi,   // Soru Sor sekmesi (Gdje/Kako/Kada/Zašto...)
-  padez,       // Padež Alanı (gramer)
+class TextPair {
+  final String bos, tr;
+  TextPair({required this.bos, required this.tr});
+  Map<String,dynamic> toMap()=>{'bos':bos,'tr':tr};
+  static TextPair fromMap(Map<String,dynamic> m)=>
+    TextPair(bos:(m['bos']??'').toString(), tr:(m['tr']??'').toString());
 }
 
-/// Çoktan seçmeli soru yapısı
-class QuizQuestion {
-  final String prompt;        // soru metni veya kelime
-  final List<String> options; // 4 şık
-  final int correct;          // doğru index
-  final QuizMode mode;
-  final String? explanation;  // padež için açıklama
+// ── Repo (Supabase erişimi)
+class Repo {
+  final SupabaseClient s = Supabase.instance.client;
 
-  QuizQuestion({
-    required this.prompt,
-    required this.options,
-    required this.correct,
-    required this.mode,
-    this.explanation,
-  });
-}
+  Map<String,dynamic> _toMap(dynamic e)=>Map<String,dynamic>.from(e as Map);
+  String _sigWord(Word w)=>'${w.bos.trim().toLowerCase()}|'
+                           '${w.tr.trim().toLowerCase()}|'
+                           '${w.tur.trim().toLowerCase()}';
 
-/// Boşluk doldurma sorusu
-class ClozeQuestion {
-  final String questionText; // "Ja pijem ____."
-  final String answer;       // "vodu"
-  ClozeQuestion({
-    required this.questionText,
-    required this.answer,
-  });
-}
-
-/// Çeviri paragrafı (Admin'in eklediği çalışma metni)
-class StudyParagraph {
-  final String bosText; // Boşnakça/BHS orijinal
-  final String trText;  // Senin doğru Türkçe çevirin
-  StudyParagraph({
-    required this.bosText,
-    required this.trText,
-  });
-}
-
-/// ------------------------------------------------------------
-/// BAŞLANGIÇ (GÖMÜLÜ) VERİLER - Uygulama açıldığında cihazda var
-/// ------------------------------------------------------------
-
-List<KelimeEntry> kelimeListesi = [
-  KelimeEntry(
-    bos: "hljeb",
-    tr: "ekmek",
-    tur: "isim",
-    cinsiyet: "m",
-    ornek: "Ja volim svjež hljeb. (Taze ekmeği severim.)",
-  ),
-  KelimeEntry(
-    bos: "kuća",
-    tr: "ev",
-    tur: "isim",
-    cinsiyet: "f",
-    ornek: "Ovo je moja kuća. (Bu benim evim.)",
-  ),
-  KelimeEntry(
-    bos: "voda",
-    tr: "su",
-    tur: "isim",
-    cinsiyet: "f",
-    ornek: "Pijem vodu. (Su içiyorum.)",
-  ),
-  KelimeEntry(
-    bos: "more",
-    tr: "deniz",
-    tur: "isim",
-    cinsiyet: "n",
-    ornek: "More je mirno. (Deniz sakin.)",
-  ),
-  KelimeEntry(
-    bos: "brat",
-    tr: "erkek kardeş",
-    tur: "isim",
-    cinsiyet: "m",
-    ornek: "Moj brat je u školi. (Kardeşim okulda.)",
-  ),
-  KelimeEntry(
-    bos: "sestra",
-    tr: "kız kardeş",
-    tur: "isim",
-    cinsiyet: "f",
-    ornek: "Imam sestru. (Bir kız kardeşim var.)",
-  ),
-  KelimeEntry(
-    bos: "škola",
-    tr: "okul",
-    tur: "isim",
-    cinsiyet: "f",
-    ornek: "Idem u školu. (Okula gidiyorum.)",
-  ),
-  KelimeEntry(
-    bos: "grad",
-    tr: "şehir",
-    tur: "isim",
-    cinsiyet: "m",
-    ornek: "Sarajevo je lijep grad. (Saraybosna güzel bir şehir.)",
-  ),
-  KelimeEntry(
-    bos: "auto",
-    tr: "araba",
-    tur: "isim",
-    cinsiyet: "n",
-    ornek: "Imam novo auto. (Yeni bir arabam var.)",
-  ),
-  KelimeEntry(
-    bos: "lijep",
-    tr: "güzel",
-    tur: "sıfat",
-    cinsiyet: null,
-    ornek: "To je lijep grad. (O güzel bir şehir.)",
-  ),
-  KelimeEntry(
-    bos: "hladan",
-    tr: "soğuk",
-    tur: "sıfat",
-    cinsiyet: null,
-    ornek: "Hladan vjetar. (Soğuk rüzgar.)",
-  ),
-  KelimeEntry(
-    bos: "pisati",
-    tr: "yazmak",
-    tur: "fiil",
-    cinsiyet: null,
-    ornek: "Moram pisati pismo. (Mektup yazmam lazım.)",
-  ),
-  KelimeEntry(
-    bos: "čitati",
-    tr: "okumak",
-    tur: "fiil",
-    cinsiyet: null,
-    ornek: "Volim čitati knjige. (Kitap okumayı severim.)",
-  ),
-  KelimeEntry(
-    bos: "ići",
-    tr: "gitmek",
-    tur: "fiil",
-    cinsiyet: null,
-    ornek: "Moram ići kući. (Eve gitmem lazım.)",
-  ),
-  KelimeEntry(
-    bos: "spavati",
-    tr: "uyumak",
-    tur: "fiil",
-    cinsiyet: null,
-    ornek: "Idem spavati. (Uyumaya gidiyorum.)",
-  ),
-  KelimeEntry(
-    bos: "dobar dan",
-    tr: "iyi günler",
-    tur: "ifade",
-  ),
-  KelimeEntry(
-    bos: "laku noć",
-    tr: "iyi geceler",
-    tur: "ifade",
-  ),
-  KelimeEntry(
-    bos: "hvala",
-    tr: "teşekkürler",
-    tur: "ifade",
-  ),
-  KelimeEntry(
-    bos: "polako",
-    tr: "yavaş / sakin",
-    tur: "zarf",
-    ornek: "Govori polako. (Yavaş konuş.)",
-  ),
-  KelimeEntry(
-    bos: "sad",
-    tr: "şimdi",
-    tur: "zarf",
-    ornek: "Sad idem. (Şimdi gidiyorum.)",
-  ),
-];
-
-/// Ezber Yap soruları
-List<QuizQuestion> ezberSorular = [
-  QuizQuestion(
-    prompt: "hljeb",
-    options: ["ekmek", "deniz", "ev", "anne"],
-    correct: 0,
-    mode: QuizMode.bsToTr,
-  ),
-  QuizQuestion(
-    prompt: "kuća",
-    options: ["okul", "ev", "ayakkabı", "baba"],
-    correct: 1,
-    mode: QuizMode.bsToTr,
-  ),
-  QuizQuestion(
-    prompt: "ekmek",
-    options: ["hljeb", "more", "kuća", "voda"],
-    correct: 0,
-    mode: QuizMode.trToBs,
-  ),
-];
-
-/// Boşluk doldur soruları
-List<ClozeQuestion> boslukSorular = [
-  ClozeQuestion(questionText: "Ja pijem ____.", answer: "vodu"),
-  ClozeQuestion(questionText: "Idem u ____.", answer: "školu"),
-  ClozeQuestion(questionText: "Ovo je ____.", answer: "kuća"),
-  ClozeQuestion(questionText: "____ je velika.", answer: "kuća"),
-  ClozeQuestion(questionText: "Volim ____.", answer: "hljeb"),
-  ClozeQuestion(questionText: "Ovo je moj ____.", answer: "brat"),
-  ClozeQuestion(questionText: "More je ____.", answer: "mirno"),
-  ClozeQuestion(questionText: "Idem spavati ____.", answer: "sad"),
-  ClozeQuestion(questionText: "To je ____ grad.", answer: "lijep"),
-  ClozeQuestion(questionText: "Pijem ____ svaki dan.", answer: "vodu"),
-];
-
-/// Soru Sor (soru zarfı, wh-words)
-List<QuizQuestion> soruZarfSorular = [
-  QuizQuestion(
-    prompt: "_____ živiš?",
-    options: ["Gdje", "Kada", "Kako", "Zašto"],
-    correct: 0,
-    mode: QuizMode.soruZarfi,
-  ),
-  QuizQuestion(
-    prompt: "_____ ideš u školu?",
-    options: ["Kada", "Zašto", "Kako", "Koliko"],
-    correct: 0,
-    mode: QuizMode.soruZarfi,
-  ),
-  QuizQuestion(
-    prompt: "_____ si umoran?",
-    options: ["Zašto", "Gdje", "Kada", "Kako"],
-    correct: 0,
-    mode: QuizMode.soruZarfi,
-  ),
-  QuizQuestion(
-    prompt: "_____ se zoveš?",
-    options: ["Kako", "Gdje", "Zašto", "Kada"],
-    correct: 0,
-    mode: QuizMode.soruZarfi,
-  ),
-  QuizQuestion(
-    prompt: "_____ godina imaš?",
-    options: ["Koliko", "Gdje", "Kako", "Zašto"],
-    correct: 0,
-    mode: QuizMode.soruZarfi,
-  ),
-];
-
-/// Padež soruları
-List<QuizQuestion> padezSorular = [
-  QuizQuestion(
-    prompt: "Idem u školu. Hangi hâl?",
-    options: ["Nominativ", "Akuzativ", "Genitiv", "Lokativ"],
-    correct: 1,
-    explanation: "u + akuzativ = nereye? (hareket yönü)",
-    mode: QuizMode.padez,
-  ),
-  QuizQuestion(
-    prompt: "Ja sam u školi. Hangi hâl?",
-    options: ["Akuzativ", "Genitiv", "Lokativ", "Instrumental"],
-    correct: 2,
-    explanation: "u + lokativ = nerede? (konum)",
-    mode: QuizMode.padez,
-  ),
-  QuizQuestion(
-    prompt: "Nema hljeba. 'hljeba' hangi hâl?",
-    options: ["Genitiv", "Lokativ", "Nominativ", "Akuzativ"],
-    correct: 0,
-    explanation: "Genitiv = yokluk / aitlik. 'Nema hljeba' = Ekmek yok.",
-    mode: QuizMode.padez,
-  ),
-];
-
-/// Çift yönlü mini sözlük (Çeviri Yap kelime kelime skor hesaplama için değil,
-/// ama ileride lazım olacak diye tuttuk)
-Map<String, String> dictBsToTr = {
-  "hljeb": "ekmek",
-  "kuća": "ev",
-  "voda": "su",
-  "brat": "erkek kardeş",
-  "sestra": "kız kardeş",
-  "škola": "okul",
-  "idem": "gidiyorum",
-  "danas": "bugün",
-  "sa": "ile",
-  "more": "deniz",
-  "grad": "şehir",
-};
-Map<String, String> dictTrToBs = {
-  "ekmek": "hljeb",
-  "ev": "kuća",
-  "su": "voda",
-  "erkek kardeş": "brat",
-  "kız kardeş": "sestra",
-  "okul": "škola",
-  "gidiyorum": "idem",
-  "bugün": "danas",
-  "ile": "sa",
-  "deniz": "more",
-  "şehir": "grad",
-};
-
-/// Çeviri paragraf listesi (Admin -> Çeviri tabında ekleniyor)
-/// Not: Uygulama "son ekleneni" gösteriyor.
-List<StudyParagraph> ceviriParagraflari = [
-  StudyParagraph(
-    bosText:
-        "Ovo je početni paragraf. Ovo će değişecek, sen Admin'den yenisini ekleyince burası güncellenmiş olacak.",
-    trText:
-        "Bu bir başlangıç paragrafıdır. Admin'den yeni metin ekleyince burada en son girilen paragraf görünecek.",
-  ),
-];
-
-/// ------------------------------------------------------------
-/// UYGULAMA (Tema yönetimi + HomeScreen)
-/// ------------------------------------------------------------
-class MyApp extends StatefulWidget {
-  const MyApp({super.key});
-  @override
-  State<MyApp> createState() => _MyAppState();
-}
-
-class _MyAppState extends State<MyApp> {
-  int themeIndex = 0; // 0 light, 1 dark, 2 soft
-
-    ThemeData _buildLight() {
-    return ThemeData(
-      brightness: Brightness.light,
-      useMaterial3: true,
-      colorSchemeSeed: Colors.indigo,
-      scaffoldBackgroundColor: const Color(0xFFF7F7F9),
-      appBarTheme: const AppBarTheme(
-        backgroundColor: Colors.white,
-        foregroundColor: Colors.black87,
-        elevation: 0,
-        centerTitle: true,
-      ),
-
-      // <-- burası düzeltildi
-      cardTheme: const CardThemeData(
-        color: Colors.white,
-        elevation: 1,
-        margin: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.all(Radius.circular(12)),
-        ),
-      ),
-    );
+  // Kelimeler
+  Future<List<Word>> fetchWords({
+    String kategori='Hepsi', String search='', int limit=1000,
+  }) async {
+    var q = s.from('kelimeler').select('*');
+    if (kategori!='Hepsi') { q = q.eq('tur', kategori); }
+    if (search.trim().isNotEmpty) {
+      final t = search.trim();
+      q = q.or('bos.ilike.%$t%,tr.ilike.%$t%');
+    }
+    final res = await q.order('bos', ascending:true).limit(limit);
+    return (res as List).map(_toMap).map(Word.fromMap).toList();
   }
 
-  ThemeData _buildDark() {
-    return ThemeData(
-      brightness: Brightness.dark,
-      useMaterial3: true,
-      colorSchemeSeed: Colors.deepPurple,
-      scaffoldBackgroundColor: const Color(0xFF0F0F12),
-      appBarTheme: const AppBarTheme(
-        backgroundColor: Color(0xFF1A1A22),
-        foregroundColor: Colors.white,
-        elevation: 0,
-        centerTitle: true,
-      ),
-
-      // <-- burası düzeltildi
-      cardTheme: const CardThemeData(
-        color: Color(0xFF1E1E28),
-        elevation: 2,
-        margin: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.all(Radius.circular(12)),
-        ),
-      ),
-    );
+  Future<bool> existsWord({required String bos, required String tr, required String tur}) async {
+    final b=bos.trim(), t=tr.trim(), u=tur.trim();
+    final res = await s.from('kelimeler').select('bos,tr,tur')
+      .or('bos.eq.$b,tr.eq.$t').limit(1000);
+    for (final m in (res as List).map(_toMap)) {
+      if ((m['bos']??'').toString().trim().toLowerCase()==b.toLowerCase() &&
+          (m['tr']??'').toString().trim().toLowerCase()==t.toLowerCase() &&
+          (m['tur']??'').toString().trim().toLowerCase()==u.toLowerCase()) {
+        return true;
+      }
+    }
+    return false;
   }
 
-  ThemeData _buildSoft() {
-    return ThemeData(
-      brightness: Brightness.light,
-      useMaterial3: true,
-      colorSchemeSeed: Colors.purpleAccent,
-      scaffoldBackgroundColor: const Color(0xFFF2EEF8),
-      appBarTheme: const AppBarTheme(
-        backgroundColor: Color(0xFFECE6FA),
-        foregroundColor: Color(0xFF2F244A),
-        elevation: 0,
-        centerTitle: true,
-      ),
-
-      // <-- burası düzeltildi
-      cardTheme: const CardThemeData(
-        color: Color(0xFFFFFFFF),
-        elevation: 1,
-        margin: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.all(Radius.circular(16)),
-        ),
-      ),
-
-      textTheme: const TextTheme(
-        bodyMedium: TextStyle(
-          color: Color(0xFF2F244A),
-        ),
-      ),
-    );
+  Future<void> addWord(Word w) async {
+    if (await existsWord(bos:w.bos,tr:w.tr,tur:w.tur)) {
+      throw 'Bu kelime zaten var: ${w.bos} → ${w.tr} (${w.tur})';
+    }
+    await s.from('kelimeler').insert(w.toMap());
   }
 
+  Future<void> updateWord({
+    required String oldBos, required String oldTr, required String oldTur,
+    required Word newWord,
+  }) async {
+    final clash = await existsWord(bos:newWord.bos,tr:newWord.tr,tur:newWord.tur);
+    final sameKey = _sigWord(newWord) ==
+        '${oldBos.toLowerCase()}|${oldTr.toLowerCase()}|${oldTur.toLowerCase()}';
+    if (clash && !sameKey) throw 'Aynı anahtar (bos+tr+tur) mevcut!';
+    await s.from('kelimeler').update(newWord.toMap())
+      .match({'bos':oldBos,'tr':oldTr,'tur':oldTur});
+  }
 
-  ThemeData _currentTheme() {
-    switch (themeIndex) {
-      case 1:
-        return _buildDark();
-      case 2:
-        return _buildSoft();
-      default:
-        return _buildLight();
+  Future<void> deleteWord({required String bos, required String tr, required String tur}) async {
+    await s.from('kelimeler').delete().match({'bos':bos,'tr':tr,'tur':tur});
+  }
+
+  Future<void> addWordsBulkSafe(List<Word> items) async {
+    if (items.isEmpty) return;
+    final seen=<String>{}; final toInsert=<Word>[];
+    for (final w in items) {
+      final sig=_sigWord(w);
+      if (seen.contains(sig)) continue;
+      seen.add(sig);
+      if (!await existsWord(bos:w.bos,tr:w.tr,tur:w.tur)) toInsert.add(w);
+    }
+    if (toInsert.isNotEmpty) {
+      await s.from('kelimeler').insert(toInsert.map((e)=>e.toMap()).toList());
     }
   }
 
-  void _cycleTheme() {
-    setState(() {
-      themeIndex = (themeIndex + 1) % 3;
-    });
+  // Metin çiftleri
+  Future<List<TextPair>> fetchTextPairs({int limit=500}) async {
+    final res = await s.from('text_pairs').select('*')
+      .order('created_at',ascending:false).limit(limit);
+    return (res as List).map(_toMap).map(TextPair.fromMap).toList();
+  }
+  Future<void> addTextPair({required String bos, required String tr}) async {
+    await s.from('text_pairs').insert({'bos':bos,'tr':tr});
+  }
+  Future<void> addTextPairsBulk(List<TextPair> items) async {
+    if (items.isEmpty) return;
+    await s.from('text_pairs').insert(items.map((e)=>e.toMap()).toList());
   }
 
-  @override
-  Widget build(BuildContext context) {
+  // Boşluk Doldurma (cloze)
+  Future<List<Map<String,String>>> fetchCloze({int limit=500}) async {
+    final res = await s.from('cloze').select('*').limit(limit);
+    final list = (res as List).map(_toMap).toList();
+    return list.map((m)=>{'sentence': (m['sentence']??'').toString(),
+                          'lang': (m['lang']??'bos').toString()}).toList();
+  }
+  Future<void> addClozeOne({required String sentence, String lang='bos'}) async {
+    await s.from('cloze').insert({'sentence':sentence,'lang':lang});
+  }
+  Future<void> addClozeBulk(List<Map<String,String>> items) async {
+    if (items.isEmpty) return;
+    await s.from('cloze').insert(items);
+  }
+}
+
+// ── App & Navigation
+class BosanskiTRApp extends StatefulWidget { const BosanskiTRApp({super.key});
+  @override State<BosanskiTRApp> createState()=>_BosanskiTRAppState(); }
+
+class _BosanskiTRAppState extends State<BosanskiTRApp>{
+  ThemeMode _mode=ThemeMode.system;
+  void _toggleTheme()=>setState(()=>_mode=_mode==ThemeMode.dark?ThemeMode.light:ThemeMode.dark);
+  @override Widget build(BuildContext context){
     return MaterialApp(
-      title: 'Bosanski TR',
-      debugShowCheckedModeBanner: false,
-      theme: _currentTheme(),
-      home: HomeScreen(onThemeChange: _cycleTheme),
+      title:'Bosanski TR', debugShowCheckedModeBanner:false,
+      themeMode:_mode,
+      theme: ThemeData(useMaterial3:true, colorSchemeSeed:Colors.blue),
+      darkTheme: ThemeData(brightness:Brightness.dark,useMaterial3:true,colorSchemeSeed:Colors.blue),
+      home: HomeScreen(onToggleTheme:_toggleTheme),
     );
   }
 }
 
-/// ------------------------------------------------------------
-/// ANA EKRAN (BottomNavigationBar)
-/// ------------------------------------------------------------
 class HomeScreen extends StatefulWidget {
-  final VoidCallback onThemeChange;
-  const HomeScreen({super.key, required this.onThemeChange});
-
-  @override
-  State<HomeScreen> createState() => _HomeScreenState();
+  final VoidCallback onToggleTheme;
+  const HomeScreen({super.key, required this.onToggleTheme});
+  @override State<HomeScreen> createState()=>_HomeScreenState();
 }
-
-class _HomeScreenState extends State<HomeScreen> {
-  int tabIndex = 0;
-
-  @override
-  Widget build(BuildContext context) {
-    final pages = [
-      KelimeOgrenPage(
-        onOpenAdmin: () {
-          Navigator.push(
-            context,
-            MaterialPageRoute(builder: (_) => const AdminPage()),
-          );
-        },
-      ),
-      const EzberYapPage(),
-      const BoslukDoldurPage(),
-      const SoruSorPage(),
-      const CeviriYapPage(),
-      const PadezPage(),
+class _HomeScreenState extends State<HomeScreen>{
+  int _idx=0; final repo=Repo();
+  @override Widget build(BuildContext context){
+    final pages=[
+      KelimeOgrenPage(repo:repo),
+      EzberYapPage(repo:repo),
+      BoslukDoldurPage(repo:repo),
+      SoruSorPage(),
+      CeviriYapPage(repo:repo),
+      PadezAlaniPage(),
+      KelimeEklePage(repo:repo),
     ];
-
-    final titles = [
-      "Kelime Öğren",
-      "Ezber Yap",
-      "Boşluk Doldur",
-      "Soru Sor",
-      "Çeviri Yap",
-      "Padež Alanı",
-    ];
-
     return Scaffold(
-      appBar: AppBar(
-        title: Text(
-          titles[tabIndex],
-          style: const TextStyle(fontWeight: FontWeight.w600),
-        ),
-        actions: [
-          IconButton(
-            tooltip: "Tema değiştir",
-            icon: const Icon(Icons.brightness_6),
-            onPressed: widget.onThemeChange,
-          ),
-          IconButton(
-            tooltip: "Admin Paneli (Ekle)",
-            icon: const Icon(Icons.add),
-            onPressed: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(builder: (_) => const AdminPage()),
-              );
-            },
-          ),
-        ],
-      ),
-      body: pages[tabIndex],
+      appBar: AppBar(title: const Text('Bosanski TR'), actions:[
+        IconButton(icon: const Icon(Icons.brightness_6), onPressed: widget.onToggleTheme, tooltip:'Tema Değiştir')
+      ]),
+      body: pages[_idx],
       bottomNavigationBar: NavigationBar(
-        selectedIndex: tabIndex,
-        labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
+        selectedIndex:_idx, onDestinationSelected:(i)=>setState(()=>_idx=i),
         destinations: const [
-          NavigationDestination(
-              icon: Icon(Icons.menu_book), label: "Kelime Öğren"),
-          NavigationDestination(icon: Icon(Icons.quiz), label: "Ezber Yap"),
-          NavigationDestination(
-              icon: Icon(Icons.edit_note), label: "Boşluk Doldur"),
-          NavigationDestination(
-              icon: Icon(Icons.help_center), label: "Soru Sor"),
-          NavigationDestination(
-              icon: Icon(Icons.translate), label: "Çeviri Yap"),
-          NavigationDestination(
-              icon: Icon(Icons.rule), label: "Padež Alanı"),
+          NavigationDestination(icon: Icon(Icons.menu_book), label: 'Kelime Öğren'),
+          NavigationDestination(icon: Icon(Icons.quiz), label: 'Ezber Yap'),
+          NavigationDestination(icon: Icon(Icons.edit), label: 'Boşluk Doldur'),
+          NavigationDestination(icon: Icon(Icons.help_center), label: 'Soru Sor'),
+          NavigationDestination(icon: Icon(Icons.translate), label: 'Çeviri Yap'),
+          NavigationDestination(icon: Icon(Icons.rule), label: 'Padej Alanı'),
+          NavigationDestination(icon: Icon(Icons.playlist_add), label: 'Kelime Ekle'),
         ],
-        onDestinationSelected: (i) {
-          setState(() {
-            tabIndex = i;
-          });
-        },
       ),
     );
   }
 }
-/// ------------------------------------------------------------
-/// KELİME ÖĞREN SAYFASI
-/// - Arama
-/// - Tür filtresi chipleri
-/// - Kartta: Boşnakça (büyük), altında Türkçesi
-/// ------------------------------------------------------------
-class KelimeOgrenPage extends StatefulWidget {
-  final VoidCallback onOpenAdmin;
-  const KelimeOgrenPage({super.key, required this.onOpenAdmin});
 
+// Helpers
+void _snack(BuildContext ctx,String msg){
+  ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(content: Text(msg)));
+}
+String _norm(String s){
+  final lower=s.toLowerCase();
+  final cleaned=lower.replaceAll(RegExp(r'[^\p{L}\p{N}\s]+', unicode:true),' ');
+  return cleaned.split(RegExp(r'\s+')).where((e)=>e.isNotEmpty).join(' ');
+}
+// PART-2 ─────────────────────────────────────────────────────────────────────
+// Kelime Öğren
+
+// Canlı arama (debounce) eklenmiş KELİME ÖĞREN sayfası
+class KelimeOgrenPage extends StatefulWidget {
+  final Repo repo;
+  const KelimeOgrenPage({super.key, required this.repo});
   @override
   State<KelimeOgrenPage> createState() => _KelimeOgrenPageState();
 }
 
 class _KelimeOgrenPageState extends State<KelimeOgrenPage> {
-  String search = "";
-  String kategori = "Hepsi"; // Hepsi / isim / fiil / sıfat / zarf / ifade
+  String kategori = 'Hepsi';
+  String search = '';
+  bool loading = false;
+
+  final _searchCtrl = TextEditingController();
+  final chips = const ['Hepsi', 'isim', 'fiil', 'sıfat', 'zarf', 'ifade'];
+
+  List<Word> words = [];
+
+  // 🔹 canlı arama için debounce timer
+  Timer? _deb;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  @override
+  void dispose() {
+    _deb?.cancel();        // timer’ı iptal et
+    _searchCtrl.dispose(); // controller’ı kapat
+    super.dispose();
+  }
+
+  Future<void> _load() async {
+    setState(() => loading = true);
+    try {
+      words = await widget.repo.fetchWords(kategori: kategori, search: search);
+    } catch (e) {
+      _snack(context, 'Hata: $e');
+    } finally {
+      if (mounted) setState(() => loading = false);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
-    final filtered = kelimeListesi.where((w) {
-      final fMatch = (kategori == "Hepsi") ? true : w.tur == kategori;
-      final s = search.toLowerCase();
-      final sMatch = w.bos.toLowerCase().contains(s) ||
-          w.tr.toLowerCase().contains(s);
-      return fMatch && sMatch;
-    }).toList();
-
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // Arama kutusu
-        Padding(
-          padding: const EdgeInsets.all(12),
-          child: TextField(
-            decoration: InputDecoration(
-              hintText: "Ara: kuća / ev ...",
-              prefixIcon: const Icon(Icons.search),
-              suffixIcon: IconButton(
-                icon: const Icon(Icons.add),
-                tooltip: "Kelime ekle",
-                onPressed: widget.onOpenAdmin,
-              ),
-              border: const OutlineInputBorder(
-                borderRadius: BorderRadius.all(Radius.circular(12)),
-              ),
-            ),
-            onChanged: (v) => setState(() => search = v),
-          ),
-        ),
-
-        // Kategori chipleri
-        SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          padding: const EdgeInsets.symmetric(horizontal: 12),
-          child: Row(
-            children: [
-              for (final t in ["Hepsi", "isim", "fiil", "sıfat", "zarf", "ifade"])
-                Padding(
-                  padding: const EdgeInsets.only(right: 8),
-                  child: ChoiceChip(
-                    label: Text(t),
-                    selected: kategori == t,
-                    onSelected: (_) {
-                      setState(() {
-                        kategori = t;
-                      });
-                    },
-                  ),
-                ),
-            ],
-          ),
-        ),
-
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-          child: Text(
-            "Filtrelenmiş: ${filtered.length} / Genel: ${kelimeListesi.length} kelime",
-            style: TextStyle(
-              fontSize: 12,
-              color: Colors.grey.withOpacity(0.8),
-            ),
-          ),
-        ),
-
-        // Liste
-        Expanded(
-          child: ListView.builder(
-            itemCount: filtered.length,
-            itemBuilder: (ctx, i) {
-              final w = filtered[i];
-              return Card(
-                margin:
-                    const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                child: Padding(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      // Boşnakça kelime
-                      Text(
-                        w.bos,
-                        style: const TextStyle(
-                          fontSize: 20,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                      const SizedBox(height: 4),
-                      // Türkçesi altında
-                      Text(
-                        w.tr,
-                        style: TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.w500,
-                          color: Colors.grey.withOpacity(0.9),
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-
-                      // tür / cinsiyet etiketleri
-                      Row(
-                        children: [
-                          _tag(w.tur),
-                          if (w.cinsiyet != null) const SizedBox(width: 8),
-                          if (w.cinsiyet != null) _tag(_cinsiyet(w.cinsiyet!)),
-                        ],
-                      ),
-
-                      // örnek cümle varsa
-                      if (w.ornek != null && w.ornek!.trim().isNotEmpty)
-                        Padding(
-                          padding: const EdgeInsets.only(top: 10),
-                          child: Text(
-                            "Örnek: ${w.ornek}",
-                            style: TextStyle(
-                              fontSize: 13,
-                              height: 1.4,
-                              color: Colors.grey.withOpacity(0.9),
-                            ),
-                          ),
-                        ),
-                    ],
-                  ),
-                ),
+        // Üstte yatay chip filtreleri
+        SizedBox(
+          height: 52,
+          child: ListView.separated(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            scrollDirection: Axis.horizontal,
+            itemCount: chips.length,
+            separatorBuilder: (_, __) => const SizedBox(width: 8),
+            itemBuilder: (_, i) {
+              final label = chips[i];
+              final selected = kategori == label;
+              final ui = i == 0 ? 'Hepsi' : label[0].toUpperCase() + label.substring(1);
+              return ChoiceChip(
+                label: Text(ui),
+                selected: selected,
+                onSelected: (_) {
+                  setState(() => kategori = label);
+                  _deb?.cancel();
+                  _load();
+                },
               );
             },
           ),
         ),
+
+        // Arama kutusu + toplam
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+          child: Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _searchCtrl,
+                  decoration: InputDecoration(
+                    hintText: 'Ara (Boşnakça/Türkçe)',
+                    prefixIcon: const Icon(Icons.search),
+                    suffixIcon: IconButton(
+                      icon: const Icon(Icons.clear),
+                      onPressed: () {
+                        _searchCtrl.clear();
+                        search = '';
+                        _deb?.cancel();
+                        _load(); // anında yenile
+                      },
+                    ),
+                  ),
+                  // 🔹 canlı arama: 250 ms sonra sorgu at
+                  onChanged: (v) {
+                    search = v;
+                    _deb?.cancel();
+                    _deb = Timer(const Duration(milliseconds: 250), _load);
+                  },
+                  // enter’a basılırsa da çalışsın
+                  onSubmitted: (v) {
+                    search = v;
+                    _deb?.cancel();
+                    _load();
+                  },
+                ),
+              ),
+              const SizedBox(width: 12),
+              Text('Toplam: ${words.length}'),
+            ],
+          ),
+        ),
+        const Divider(height: 0),
+
+        // Liste
+        Expanded(
+          child: loading
+              ? const Center(child: CircularProgressIndicator())
+              : ListView.builder(
+                  itemCount: words.length,
+                  itemBuilder: (_, i) {
+                    final w = words[i];
+                    return ListTile(
+                      title: Text('${w.bos}  →  ${w.tr}'),
+                      subtitle: Text(
+                        'Tür: ${w.tur}  |  Cinsiyet: ${w.gender}  |  Örnek: ${w.example.isEmpty ? "-" : w.example}',
+                      ),
+                    );
+                  },
+                ),
+        ),
       ],
     );
   }
-
-  String _cinsiyet(String raw) {
-    switch (raw) {
-      case "m":
-        return "Eril";
-      case "f":
-        return "Dişil";
-      case "n":
-        return "Nötr";
-      default:
-        return raw;
-    }
-  }
-
-  Widget _tag(String text) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: Colors.grey.withOpacity(0.4)),
-      ),
-      child: Text(
-        text,
-        style: const TextStyle(fontSize: 12),
-      ),
-    );
-  }
 }
 
-/// ------------------------------------------------------------
-/// EZBER YAP SAYFASI
-/// - Çoktan seçmeli
-/// - Anında Tačno / Netačno snackbar
-/// - Otomatik sonraki soru
-/// - Skor yukarıda
-/// ------------------------------------------------------------
-class EzberYapPage extends StatefulWidget {
-  const EzberYapPage({super.key});
+// PART-3 ─────────────────────────────────────────────────────────────────────
+// Ezber Yap — kelime havuzundan (tüm türler)
 
-  @override
-  State<EzberYapPage> createState() => _EzberYapPageState();
+class EzberYapPage extends StatefulWidget{
+  final Repo repo; const EzberYapPage({super.key, required this.repo});
+  @override State<EzberYapPage> createState()=>_EzberYapPageState();
 }
+class _EzberYapPageState extends State<EzberYapPage>{
+  final rnd=Random(); bool loading=false;
+  List<Word> pool=[]; Word? current; List<String> options=[]; String? selected;
+  bool bosToTr=true; int correct=0,total=0; final asked=<int>{};
 
-class _EzberYapPageState extends State<EzberYapPage> {
-  final Random _rnd = Random();
-
-  QuizQuestion? current;
-  int correctCount = 0;
-  int totalCount = 0;
-
-  @override
-  void initState() {
-    super.initState();
-    current = _nextQuestion();
+  @override void initState(){ super.initState(); _load(); }
+  Future<void> _load() async{
+    if(!mounted) return;
+    setState(()=>loading=true);
+    try{
+      pool=await widget.repo.fetchWords(limit:1000);
+      if (pool.length<2){ _snack(context,'Ezber için en az 2 kelime ekleyin.'); return; }
+      _next();
+    }catch(e){ _snack(context,'Hata: $e'); }
+    finally{ if(mounted) setState(()=>loading=false); }
   }
 
-  QuizQuestion _nextQuestion() {
-    return ezberSorular[_rnd.nextInt(ezberSorular.length)];
-  }
+  void _next(){
+    if(!mounted || pool.isEmpty) return;
+    if (asked.length==pool.length) asked.clear();
+    bosToTr=rnd.nextBool();
 
-  String _questionHeader(QuizQuestion q) {
-    switch (q.mode) {
-      case QuizMode.bsToTr:
-        return "Boşnakça kelime:";
-      case QuizMode.trToBs:
-        return "Türkçe kelime:";
-      default:
-        return "";
+    int idx=rnd.nextInt(pool.length), guard=0;
+    while(asked.contains(idx) && guard<50){ idx=rnd.nextInt(pool.length); guard++; }
+    asked.add(idx); current=pool[idx];
+
+    final correctAns = bosToTr? current!.tr : current!.bos;
+    final answers = <String>{correctAns};
+    while (answers.length<4 && answers.length<pool.length){
+      final other=pool[rnd.nextInt(pool.length)];
+      answers.add(bosToTr? other.tr : other.bos);
     }
+    options=answers.toList()..shuffle();
+    if (options.length<2) { options=[correctAns]; }
+    selected=null; setState((){});
   }
 
-  String _questionBody(QuizQuestion q) {
-    switch (q.mode) {
-      case QuizMode.bsToTr:
-        return "Bu kelimenin Türkçesi nedir?";
-      case QuizMode.trToBs:
-        return "Bu kelimenin Boşnakçası nedir?";
-      default:
-        return "";
-    }
+  void _answer(String choice){
+    final correctAns = bosToTr? current!.tr : current!.bos;
+    final ok = choice.trim().toLowerCase()==correctAns.trim().toLowerCase();
+    setState(()=>total++); if (ok) setState(()=>correct++);
+    _snack(context, ok? 'Tačno ✅' : 'Ne tačno ❌');
+    Future.delayed(const Duration(milliseconds:400), _next);
   }
 
-  void _answer(int index) {
-    if (current == null) return;
-    final bool isCorrect = (index == current!.correct);
-
-    setState(() {
-      totalCount++;
-      if (isCorrect) correctCount++;
-    });
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(isCorrect ? "Tačno ✅" : "Netačno ❌"),
-        duration: const Duration(milliseconds: 800),
-      ),
-    );
-
-    setState(() {
-      current = _nextQuestion();
-    });
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    if (current == null) {
-      return const Center(child: Text("Soru yok"));
-    }
-
-    final q = current!;
-    final pct =
-        totalCount == 0 ? 0 : ((correctCount / totalCount) * 100).round();
-
-    return Padding(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        children: [
-          // skor
-          Text(
-            "Doğru: $correctCount / Toplam: $totalCount (%$pct)",
-            style: TextStyle(
-              fontWeight: FontWeight.w600,
-              color: Colors.grey.withOpacity(0.9),
+  @override Widget build(BuildContext context){
+    final percent = total==0?0:((correct*100)/total).round();
+    if (loading || current==null) return const Center(child:CircularProgressIndicator());
+    return Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth:600),
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(mainAxisSize: MainAxisSize.min, children:[
+            Text('Doğru: $correct / $total  |  %$percent'),
+            const SizedBox(height:12),
+            Text(
+              bosToTr? '“${current!.bos}” kelimesinin Türkçesi nedir?'
+                      : '“${current!.tr}” kelimesinin Boşnakçası nedir?',
+              style: Theme.of(context).textTheme.titleLarge, textAlign: TextAlign.center,
             ),
-          ),
-          const SizedBox(height: 16),
-
-          // soru kartı
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                children: [
-                  Text(
-                    _questionHeader(q),
-                    style: TextStyle(
-                      fontSize: 14,
-                      color: Colors.grey.withOpacity(0.8),
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    q.prompt,
-                    style: const TextStyle(
-                      fontSize: 24,
-                      fontWeight: FontWeight.w700,
-                    ),
-                    textAlign: TextAlign.center,
-                  ),
-                  const SizedBox(height: 12),
-                  Text(
-                    _questionBody(q),
-                    style: const TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.w600,
-                    ),
-                    textAlign: TextAlign.center,
-                  ),
-                ],
-              ),
-            ),
-          ),
-          const SizedBox(height: 16),
-
-          // şıklar
-          for (int i = 0; i < q.options.length; i++)
-            Card(
-              child: ListTile(
-                title: Text(q.options[i]),
-                onTap: () => _answer(i),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-}
-
-/// ------------------------------------------------------------
-/// BOŞLUK DOLDUR SAYFASI
-/// - Cümle içinde boşluk: Ja pijem ____.
-/// - Kullanıcı yazıyor
-/// - Kontrol Et -> Tačno / Netačno + doğru cevap
-/// - Sonra otomatik yenisine geç
-/// ------------------------------------------------------------
-class BoslukDoldurPage extends StatefulWidget {
-  const BoslukDoldurPage({super.key});
-
-  @override
-  State<BoslukDoldurPage> createState() => _BoslukDoldurPageState();
-}
-
-class _BoslukDoldurPageState extends State<BoslukDoldurPage> {
-  final Random _rnd = Random();
-  final TextEditingController _ctrl = TextEditingController();
-
-  late ClozeQuestion current;
-
-  @override
-  void initState() {
-    super.initState();
-    current = _nextQ();
-  }
-
-  ClozeQuestion _nextQ() {
-    return boslukSorular[_rnd.nextInt(boslukSorular.length)];
-  }
-
-  void _check() {
-    final guess = _ctrl.text.trim().toLowerCase();
-    final ans = current.answer.trim().toLowerCase();
-    final ok = (guess == ans);
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          ok
-              ? "Tačno ✅"
-              : "Netačno ❌ / Doğru cevap: ${current.answer}",
-        ),
-        duration: const Duration(milliseconds: 1000),
-      ),
-    );
-
-    setState(() {
-      current = _nextQ();
-      _ctrl.clear();
-    });
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        children: [
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Text(
-                current.questionText,
-                style: const TextStyle(
-                  fontSize: 20,
-                  fontWeight: FontWeight.w600,
+            const SizedBox(height:16),
+            for (final o in options)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical:6),
+                child: FilledButton.tonal(
+                  onPressed: ()=>_answer(o),
+                  child: Padding(padding: const EdgeInsets.all(12), child: Text(o, textAlign: TextAlign.center)),
                 ),
-                textAlign: TextAlign.center,
               ),
-            ),
-          ),
-          const SizedBox(height: 16),
-
-          TextField(
-            controller: _ctrl,
-            decoration: const InputDecoration(
-              labelText: "Cevabın",
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.all(Radius.circular(12)),
-              ),
-            ),
-            onSubmitted: (_) => _check(),
-          ),
-          const SizedBox(height: 12),
-
-          ElevatedButton.icon(
-            onPressed: _check,
-            icon: const Icon(Icons.check),
-            label: const Text("Kontrol Et"),
-          ),
-        ],
+          ]),
+        ),
       ),
     );
   }
 }
 
-/// ------------------------------------------------------------
-/// SORU SOR SAYFASI
-/// - Yapı Ezber Yap gibi
-/// - Şıklar soru zarfları: Gdje / Kada / Kako / Zašto
-/// - Türkçe şık YOK artık (sen öyle istedin)
-/// ------------------------------------------------------------
+// Boşluk Doldurma — cloze tablosu (yoksa gömülü default)
+class BoslukDoldurPage extends StatefulWidget{
+  final Repo repo; const BoslukDoldurPage({super.key, required this.repo});
+  @override State<BoslukDoldurPage> createState()=>_BoslukDoldurPageState();
+}
+class _BoslukDoldurPageState extends State<BoslukDoldurPage> {
+  final rnd = Random();
+  List<Map<String, dynamic>> cloze = [];
+  String shown = '';
+  String answer = '';
+  String result = '';
+  final ctrl = TextEditingController();
+  List<String> options = [];
+  bool loading = false;
+
+  // ✅ Sayaç değişkenleri
+  int correct = 0;
+  int total = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() => loading = true);
+    try {
+      final data = await Supabase.instance.client.from('cloze').select();
+      cloze = (data as List).cast<Map<String, dynamic>>();
+      _newQuestion();
+    } catch (e) {
+      shown = 'Hata: $e';
+    }
+    setState(() => loading = false);
+  }
+
+  void _newQuestion() {
+    if (cloze.isEmpty) {
+      shown = 'Önce Kelime Ekle > Boşluk’tan içerik ekle.';
+      setState(() {});
+      return;
+    }
+
+    final item = cloze[rnd.nextInt(cloze.length)];
+    final raw = (item['sentence'] ?? '').trim();
+
+    // [[işaretli]] kelime kontrolü
+    final marked = RegExp(r'\[\[(.+?)\]\]');
+    final m = marked.firstMatch(raw);
+    if (m != null) {
+      answer = m.group(1)!;
+      shown = raw.replaceAll(marked, '______');
+    } else {
+      final tokens = raw.split(RegExp(r'\s+')).where((e) => e.isNotEmpty).toList();
+      if (tokens.length < 2) {
+        shown = raw;
+      } else {
+        final idx = rnd.nextInt(tokens.length);
+        answer = tokens[idx];
+        tokens[idx] = '______';
+        shown = tokens.join(' ');
+      }
+    }
+
+    // 4 şık üret
+    final allWords = cloze.map((e) {
+      final match = RegExp(r'\[\[(.+?)\]\]').firstMatch(e['sentence'] ?? '');
+      return match?.group(1);
+    }).whereType<String>().toList();
+    allWords.shuffle();
+
+    final wrongs = allWords.where((w) => w != answer).take(3).toList();
+    options = ([answer, ...wrongs]..shuffle());
+
+    ctrl.clear();
+    result = '';
+    setState(() {});
+  }
+
+  void _check(String guess) {
+    total++; // toplam soru
+    final ok = guess.trim().toLowerCase() == answer.trim().toLowerCase();
+    if (ok) correct++;
+
+    result = ok ? '✅ Tačno!' : '❌ Netačno! Cevap: $answer';
+    setState(() {});
+    Future.delayed(const Duration(seconds: 1), () {
+      _newQuestion();
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    double percent = total == 0 ? 0 : (correct / total * 100);
+    return loading
+        ? const Center(child: CircularProgressIndicator())
+        : Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                // ✅ Skor göstergesi
+                Text(
+                  'Skor: $correct / $total  (${percent.toStringAsFixed(0)}%)',
+                  style: const TextStyle(
+                      fontSize: 18, fontWeight: FontWeight.bold, color: Colors.blue),
+                ),
+                const SizedBox(height: 20),
+
+                Text(
+                  shown,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(fontSize: 22),
+                ),
+                const SizedBox(height: 20),
+
+                Wrap(
+                  spacing: 10,
+                  runSpacing: 10,
+                  alignment: WrapAlignment.center,
+                  children: options
+                      .map((opt) => ElevatedButton(
+                            onPressed: () => _check(opt),
+                            child: Text(opt, style: const TextStyle(fontSize: 18)),
+                          ))
+                      .toList(),
+                ),
+
+                const SizedBox(height: 20),
+
+                TextField(
+                  controller: ctrl,
+                  textAlign: TextAlign.center,
+                  decoration: const InputDecoration(
+                    hintText: 'Cevabı yaz (istersen)',
+                    border: OutlineInputBorder(),
+                  ),
+                  onSubmitted: (val) => _check(val),
+                ),
+
+                const SizedBox(height: 20),
+                Text(
+                  result,
+                  style: TextStyle(
+                      fontSize: 20,
+                      color: result.startsWith('✅')
+                          ? Colors.green
+                          : result.startsWith('❌')
+                              ? Colors.red
+                              : Colors.black),
+                ),
+              ],
+            ),
+          );
+  }
+}
+
+
+
+// ========================= SORU SOR (Gelişmiş) ===============================
 class SoruSorPage extends StatefulWidget {
   const SoruSorPage({super.key});
-
   @override
   State<SoruSorPage> createState() => _SoruSorPageState();
 }
 
 class _SoruSorPageState extends State<SoruSorPage> {
-  final Random _rnd = Random();
+  // Soru modeli: soru, şıklar, doğruIndex, ipucu, açıklama, etiket
+  final List<({String q, List<String> a, int c, String hint, String exp, String tag})> bank = [
+    // tag: "zaman", "yer", "sebep", "yön", "kişi", "miktar", "karışık"
+    (q:'“Gdje?” ne demektir?', a:['Nerede?','Ne zaman?','Niçin?','Nasıl?'], c:0, hint:'Mekan sorar.', exp:'Gdje = Nerede?', tag:'yer'),
+    (q:'“Kada?” ne demektir?', a:['Ne kadar?','Ne zaman?','Nereden?','Kimin?'], c:1, hint:'Zaman sorar.', exp:'Kada = Ne zaman?', tag:'zaman'),
+    (q:'“Zašto?” ne demektir?', a:['Niçin?','Neden?','İkisi de','Hiçbiri'], c:2, hint:'Sebep/amaç.', exp:'Zašto = Neden/Niçin.', tag:'sebep'),
+    (q:'“Kako?” ne demektir?', a:['Ne?','Nasıl?','Nerede?','Kim?'], c:1, hint:'Yöntem/biçim.', exp:'Kako = Nasıl?', tag:'karışık'),
+    (q:'“Ko?” ne demektir?', a:['Kim?','Ne?','Hangisi?','Neden?'], c:0, hint:'Kişi sorar.', exp:'Ko = Kim?', tag:'kişi'),
+    (q:'“Šta?” ne demektir?', a:['Ne?','Ne zaman?','Nereye?','Neden?'], c:0, hint:'Nesne/şey.', exp:'Šta = Ne?', tag:'karışık'),
+    (q:'“Kuda?” ne demektir?', a:['Nereye?','Nereden?','Ne kadar?','Niçin?'], c:0, hint:'Yön (hedef).', exp:'Kuda = Nereye?', tag:'yön'),
+    (q:'“Odakle?” ne demektir?', a:['Neredeydi?','Nereden?','Ne kadar?','Hangi?'], c:1, hint:'Kaynak/çıkış.', exp:'Odakle = Nereden?', tag:'yön'),
+    (q:'“Koliko?” ne demektir?', a:['Ne kadar?','Kaçta?','Kaçıncı?','Ne zaman?'], c:0, hint:'Miktar/sayı.', exp:'Koliko = Ne kadar?/Kaç?', tag:'miktar'),
+    (q:'“Čiji?” ne demektir?', a:['Kimin?','Neden?','Hangi?','Nasıl?'], c:0, hint:'Sahiplik.', exp:'Čiji/čija/čije = Kimin?', tag:'kişi'),
+    // Kolay örnek cümleli sorular:
+    (q:'Cümlede eksik soru zarfı: “___ ideš u školu?”', a:['Kada','Gdje','Kuda','Kako'], c:2, hint:'Yön/hedef.', exp:'“Kuda ideš?” = Nereye gidiyorsun?', tag:'yön'),
+    (q:'“___ počinje čas?” (Ders ne zaman başlıyor?)', a:['Kada','Gdje','Zašto','Koliko'], c:0, hint:'Zaman.', exp:'Kada počinje čas?', tag:'zaman'),
+    (q:'“___ živiš?” (Nerede yaşıyorsun?)', a:['Kako','Gdje','Zašto','Kuda'], c:1, hint:'Mekan.', exp:'Gdje živiš?', tag:'yer'),
+    (q:'“___ učiš bosanski?” (Neden Boşnakça öğreniyorsun?)', a:['Koliko','Zašto','Kako','Odakle'], c:1, hint:'Sebep.', exp:'Zašto učiš bosanski?', tag:'sebep'),
+    (q:'“___ ide voz?” (Tren nereye gidiyor?)', a:['Kuda','Odakle','Kada','Gdje'], c:0, hint:'Yön.', exp:'Kuda ide voz?', tag:'yön'),
+    (q:'“___ dolaziš?” (Nereden geliyorsun?)', a:['Odakle','Kuda','Koliko','Kako'], c:0, hint:'Kaynak.', exp:'Odakle dolaziš?', tag:'yön'),
+    (q:'“___ košta hljeb?” (Ekmek ne kadar?)', a:['Koliko','Kada','Zašto','Gdje'], c:0, hint:'Miktar.', exp:'Koliko košta hljeb?', tag:'miktar'),
+    (q:'“___ se zoveš?” (Adın ne?)', a:['Šta','Ko','Kako','Čiji'], c:2, hint:'Biçim/isim sorma kalıbı.', exp:'Kako se zoveš? = Adın ne?', tag:'karışık'),
+    (q:'“___ ti je to auto?” (Bu araba kimin?)', a:['Čiji','Ko','Gdje','Kako'], c:0, hint:'Sahiplik.', exp:'Čiji ti je to auto?', tag:'kişi'),
+    (q:'“___ radiš doma?” (Evde ne yapıyorsun?)', a:['Šta','Kako','Gdje','Zašto'], c:0, hint:'Nesne.', exp:'Šta radiš doma?', tag:'karışık'),
+    // Biraz daha
+    (q:'“___ sati je?”', a:['Koliko','Kada','Ko','Gdje'], c:0, hint:'Saat/miktar.', exp:'Koliko je sati?', tag:'miktar'),
+    (q:'“___ si umoran?”', a:['Zašto','Kada','Kako','Ko'], c:0, hint:'Sebep.', exp:'Zašto si umoran?', tag:'sebep'),
+    (q:'“___ autobus polazi?”', a:['Kada','Gdje','Odakle','Kuda'], c:0, hint:'Zaman.', exp:'Kada autobus polazi?', tag:'zaman'),
+    (q:'“___ ideš poslije posla?”', a:['Kuda','Odakle','Gdje','Kako'], c:0, hint:'Yön/hedef.', exp:'Kuda ideš poslije posla?', tag:'yön'),
+    (q:'“___ radi učitelj?”', a:['Ko','Šta','Kako','Gdje'], c:1, hint:'Nesne/eylem.', exp:'Šta radi učitelj?', tag:'karışık'),
+    (q:'“___ je restoran?”', a:['Gdje','Kada','Kako','Zašto'], c:0, hint:'Mekan.', exp:'Gdje je restoran?', tag:'yer'),
+    (q:'“___ si došao?”', a:['Odakle','Kada','Kako','Zašto'], c:0, hint:'Kaynak.', exp:'Odakle si došao?', tag:'yön'),
+    (q:'“___ učiš — sam ili s prijateljem?”', a:['Kako','Ko','Šta','Kada'], c:0, hint:'Biçim/yöntem.', exp:'Kako učiš?', tag:'karışık'),
+  ];
 
-  QuizQuestion? current;
-  int dogruSay = 0;
-  int toplamSay = 0;
+  // Durum
+  late List<int> order;       // karıştırılmış indeksler
+  int i = 0;                  // şu anki soru indeksinin sırası (order içinde)
+  int? chosen;                // seçilen şık
+  bool showHint = false;
+  bool showExp  = false;
+
+  // Sayaç/puan
+  int correct = 0;
+  int total   = 0;
+  int streak  = 0;
+  int best    = 0;
+
+  // Süre
+  static const int limitSec = 20;
+  int left = limitSec;
+  Timer? t;
+
+  // Joker: 50-50 (her soruda 1 kez)
+  bool fiftyUsed = false;
+  Set<int> disabled = {};
+
+  // Filtre (etiketler)
+  final tags = const ['tümü','zaman','yer','sebep','yön','kişi','miktar','karışık'];
+  String activeTag = 'tümü';
+  late List<int> filtered;
 
   @override
   void initState() {
     super.initState();
-    current = _nextQuestion();
+    _applyFilter();
+    _startQuestion();
   }
 
-  QuizQuestion _nextQuestion() {
-    return soruZarfSorular[_rnd.nextInt(soruZarfSorular.length)];
+  @override
+  void dispose() {
+    t?.cancel();
+    super.dispose();
   }
 
-  void _answer(int i) {
-    if (current == null) return;
-    final bool isCorrect = (i == current!.correct);
+  void _applyFilter() {
+    filtered = [];
+    for (int idx=0; idx<bank.length; idx++) {
+      if (activeTag == 'tümü' || bank[idx].tag == activeTag) {
+        filtered.add(idx);
+      }
+    }
+    filtered.shuffle();
+    order = filtered;
+    i = 0;
+  }
 
-    setState(() {
-      toplamSay++;
-      if (isCorrect) dogruSay++;
+  void _startTimer() {
+    t?.cancel();
+    left = limitSec;
+    t = Timer.periodic(const Duration(seconds:1), (timer) {
+      if (!mounted) return;
+      if (left <= 0) {
+        timer.cancel();
+        _finalizeAnswer(-1); // süreden kaybetti
+      } else {
+        setState(()=> left--);
+      }
     });
+  }
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(isCorrect ? "Tačno ✅" : "Netačno ❌"),
-        duration: const Duration(milliseconds: 800),
-      ),
+  void _startQuestion() {
+    if (order.isEmpty) {
+      // filtre çok dar olabilir
+      _snack(context, 'Bu filtrede soru yok. Filtreyi genişlet.');
+      return;
+    }
+    chosen = null;
+    showHint = false;
+    showExp  = false;
+    fiftyUsed = false;
+    disabled.clear();
+    _startTimer();
+    setState((){});
+  }
+
+  void _nextQuestion() {
+    i++;
+    if (i >= order.length) {
+      // test bitti: baştan karıştır
+      order.shuffle();
+      i = 0;
+    }
+    _startQuestion();
+  }
+
+  void _finalizeAnswer(int selected) {
+    // -1 = süre bitti / cevap verilmedi
+    t?.cancel();
+    final q = bank[order[i]];
+    final ok = (selected == q.c);
+    total++;
+    if (ok) {
+      correct++;
+      streak++;
+      if (streak > best) best = streak;
+      _snack(context, 'Tačno ✅');
+    } else {
+      streak = 0;
+      final ans = q.a[q.c];
+      _snack(context, 'Ne tačno ❌  (Doğru: $ans)');
+    }
+    // 900ms sonra sonraki soru
+    Future.delayed(const Duration(milliseconds:900), _nextQuestion);
+    setState((){ chosen = selected; });
+  }
+
+  void _useFifty() {
+    if (fiftyUsed) return;
+    final q = bank[order[i]];
+    final wrongs = <int>[];
+    for (var k=0; k<q.a.length; k++) {
+      if (k != q.c) wrongs.add(k);
+    }
+    wrongs.shuffle();
+    // iki yanlış şıkkı pasifleştir
+    disabled = wrongs.take(2).toSet();
+    fiftyUsed = true;
+    setState((){});
+  }
+
+  void _skip() {
+    _finalizeAnswer(-1); // cezalı atla (yanlış sayılmaz istiyorsan total++ etme)
+  }
+
+  Widget _chip(String label, bool selected, VoidCallback onTap) {
+    return ChoiceChip(
+      label: Text(label),
+      selected: selected,
+      onSelected: (_) => onTap(),
     );
-
-    setState(() {
-      current = _nextQuestion();
-    });
   }
 
   @override
   Widget build(BuildContext context) {
-    if (current == null) {
-      return const Center(child: Text("Soru yok"));
+    if (order.isEmpty) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            const Text('Bu filtrede soru yok.'),
+            const SizedBox(height:8),
+            FilledButton(
+              onPressed: (){
+                activeTag = 'tümü';
+                _applyFilter();
+                _startQuestion();
+              },
+              child: const Text('Filtreyi sıfırla'),
+            )
+          ]),
+        ),
+      );
     }
 
-    final q = current!;
-    final pct =
-        toplamSay == 0 ? 0 : ((dogruSay / toplamSay) * 100).round();
+    final q = bank[order[i]];
+    final percent = total==0 ? 0 : ((correct*100)/total).round();
 
     return Padding(
       padding: const EdgeInsets.all(16),
-      child: Column(
-        children: [
-          Text(
-            "Doğru: $dogruSay / Toplam: $toplamSay (%$pct)",
-            style: TextStyle(
-              fontWeight: FontWeight.w600,
-              color: Colors.grey.withOpacity(0.9),
-            ),
-          ),
-          const SizedBox(height: 16),
+      child: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 720),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // Üst bar: skor / süre / ilerleme
+              Row(
+                children: [
+                  Text('Skor: $correct/$total  (%$percent)'),
+                  const SizedBox(width:12),
+                  Text('Seri: $streak  | Rekor: $best'),
+                  const Spacer(),
+                  // süre göstergesi
+                  Stack(
+                    alignment: Alignment.center,
+                    children: [
+                      SizedBox(
+                        height: 26, width: 26,
+                        child: CircularProgressIndicator(
+                          value: left/limitSec,
+                        ),
+                      ),
+                      Text('$left', style: const TextStyle(fontSize: 12)),
+                    ],
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
 
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Text(
-                q.prompt,
-                style: const TextStyle(
-                  fontSize: 20,
-                  fontWeight: FontWeight.w600,
+              // Filtre chipleri
+              SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  children: [
+                    for (final t in tags) Padding(
+                      padding: const EdgeInsets.only(right:8),
+                      child: _chip(t, activeTag==t, (){
+                        activeTag = t;
+                        _applyFilter();
+                        _startQuestion();
+                      }),
+                    ),
+                  ],
                 ),
-                textAlign: TextAlign.center,
               ),
-            ),
-          ),
-          const SizedBox(height: 16),
+              const SizedBox(height: 16),
 
-          for (int i = 0; i < q.options.length; i++)
-            Card(
-              child: ListTile(
-                title: Text(q.options[i]),
-                onTap: () => _answer(i),
+              // Soru metni
+              Text(
+                q.q,
+                textAlign: TextAlign.center,
+                style: Theme.of(context).textTheme.titleLarge,
               ),
-            ),
-        ],
+              const SizedBox(height: 12),
+
+              // Şıklar
+              for (int k=0; k<q.a.length; k++)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical:6),
+                  child: FilledButton.tonal(
+                    onPressed: (chosen==null && !disabled.contains(k))
+                        ? ()=>_finalizeAnswer(k)
+                        : null,
+                    child: Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: Text(
+                        q.a[k],
+                        textAlign: TextAlign.center,
+                      ),
+                    ),
+                  ),
+                ),
+
+              const SizedBox(height: 8),
+
+              // Kontrol butonları
+              Row(
+                children: [
+                  IconButton.filledTonal(
+                    tooltip: '50-50',
+                    onPressed: (!fiftyUsed && chosen==null) ? _useFifty : null,
+                    icon: const Icon(Icons.percent),
+                  ),
+                  const SizedBox(width:8),
+                  IconButton.filledTonal(
+                    tooltip: 'Atla',
+                    onPressed: (chosen==null) ? _skip : null,
+                    icon: const Icon(Icons.skip_next),
+                  ),
+                  const Spacer(),
+                  // ipucu / açıklama
+                  TextButton.icon(
+                    onPressed: ()=>setState(()=>showHint=!showHint),
+                    icon: const Icon(Icons.lightbulb),
+                    label: const Text('İpucu'),
+                  ),
+                  const SizedBox(width:8),
+                  TextButton.icon(
+                    onPressed: ()=>setState(()=>showExp=!showExp),
+                    icon: const Icon(Icons.info_outline),
+                    label: const Text('Açıklama'),
+                  ),
+                ],
+              ),
+
+              if (showHint) Padding(
+                padding: const EdgeInsets.only(top:8),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text('İpucu: ${q.hint}'),
+                ),
+              ),
+              if (showExp) Padding(
+                padding: const EdgeInsets.only(top:4),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text('Açıklama: ${q.exp}'),
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
 }
-/// ------------------------------------------------------------
-/// ÇEVİRİ YAP SAYFASI
-///
-/// - bsToTr = true ise:
-///   Üstte Boşnakça metin gösterilir, kullanıcı altta Türkçe çeviri yazar.
-///   Doğrulama yaparken hocanın Türkçe metniyle kıyaslar.
-/// - bsToTr = false ise tam tersi.
-///
-/// - "Kontrol Et" tıklayınca:
-///   Kelime bazlı basit eşleşme -> Doğru / Toplam / %Başarı ve
-///   yanlış görülen kelimeler listesi.
-/// - Kullanıcının cevabı + skor kartı ekranda kalır.
-/// - En son Admin'de eklenmiş paragrafı gösterir (ceviriParagraflari.last).
-/// ------------------------------------------------------------
-class CeviriYapPage extends StatefulWidget {
-  const CeviriYapPage({super.key});
 
+// PART-4 ─────────────────────────────────────────────────────────────────────
+// Çeviri Yap — yön seçimi, doğruluk %, yanlış/eksik; listede sadece kaynak taraf
+
+// Çeviri Yap — sade akış: yön seç, ref'ten getir → kaynak dolsun,
+// kullanıcı hedefi yazar, Kontrol Et ile referans hedefle karşılaştır.
+// Listeleme YOK, sadece iki giriş alanı + sonuç.
+
+class CeviriYapPage extends StatefulWidget {
+  final Repo repo;
+  const CeviriYapPage({super.key, required this.repo});
   @override
   State<CeviriYapPage> createState() => _CeviriYapPageState();
 }
 
 class _CeviriYapPageState extends State<CeviriYapPage> {
-  bool bsToTr = true; // true: Boşnakça -> Türkçe, false: Türkçe -> Boşnakça
-  final TextEditingController _cevapCtrl = TextEditingController();
+  final src = TextEditingController();   // Kaynak metin (ref'ten gelir)
+  final user = TextEditingController();  // Kullanıcının çevirisi
+  bool bosToTr = true;                   // true: Bos→Tr, false: Tr→Bos
+  List<TextPair> pairs = [];
+  bool loading = false;
 
-  // son sonuçları aşağıda göstermek için
-  String _lastUserAnswer = "";
-  String _lastScoreText = "";
-
-  StudyParagraph get aktifParagraf => ceviriParagraflari.isNotEmpty
-      ? ceviriParagraflari.last
-      : StudyParagraph(
-          bosText: "Paragraf yok. Admin panelinden Çeviri sekmesine metin ekle.",
-          trText: "Paragraf yok. Admin panelinden Çeviri sekmesine metin ekle.",
-        );
-
-  void _toggleMode() {
-    setState(() {
-      bsToTr = !bsToTr;
-      _lastUserAnswer = "";
-      _lastScoreText = "";
-      _cevapCtrl.clear();
-    });
-  }
-
-  // kelime bazlı basit puanlama
-  Map<String, dynamic> _hesaplaSkor({
-    required String userAnswer,
-    required String dogruMetin,
-  }) {
-    // normalize et: noktalama ve büyük-küçük farkını sil
-    final cleanUser = userAnswer
-        .toLowerCase()
-        .replaceAll(RegExp(r'[^\p{L}\p{N}\s]', unicode: true), '');
-    final cleanTrue = dogruMetin
-        .toLowerCase()
-        .replaceAll(RegExp(r'[^\p{L}\p{N}\s]', unicode: true), '');
-
-    final userWords = cleanUser
-        .split(RegExp(r'\s+'))
-        .where((w) => w.isNotEmpty)
-        .toList();
-    final trueWords = cleanTrue
-        .split(RegExp(r'\s+'))
-        .where((w) => w.isNotEmpty)
-        .toList();
-
-    int correct = 0;
-    final wrongWords = <String>[];
-
-    for (final w in userWords) {
-      if (trueWords.contains(w)) {
-        correct++;
-      } else {
-        wrongWords.add(w);
-      }
-    }
-
-    final total = userWords.length;
-    final pct = total == 0 ? 0 : ((correct / total) * 100).round();
-
-    return {
-      "correct": correct,
-      "total": total,
-      "pct": pct,
-      "wrong": wrongWords,
-    };
-  }
-
-  void _kontrolEt() {
-    final girilen = _cevapCtrl.text.trim();
-    if (girilen.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text("Cevabını yazmadın ❌"),
-          duration: Duration(milliseconds: 1200),
-        ),
-      );
-      return;
-    }
-
-    // Hangi taraf referans olacak?
-    // bsToTr TRUE ise:
-    //   kullanıcı TR yazıyor, doğru cevap = aktifParagraf.trText
-    // bsToTr FALSE ise:
-    //   kullanıcı BS yazıyor, doğru cevap = aktifParagraf.bosText
-    final dogruMetin = bsToTr ? aktifParagraf.trText : aktifParagraf.bosText;
-
-    final skor = _hesaplaSkor(
-      userAnswer: girilen,
-      dogruMetin: dogruMetin,
-    );
-
-    final c = skor["correct"];
-    final t = skor["total"];
-    final p = skor["pct"];
-    final wrong = (skor["wrong"] as List<String>);
-
-    final rapor = "Doğru: $c / Toplam: $t (%$p)\n"
-        "Zayıf / farklı kelimeler: ${wrong.isEmpty ? "-" : wrong.join(", ")}";
-
-    setState(() {
-      _lastUserAnswer = girilen;
-      _lastScoreText = rapor;
-    });
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text("Kontrol edildi ✅"),
-        duration: Duration(milliseconds: 800),
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final kaynakMetin = bsToTr ? aktifParagraf.bosText : aktifParagraf.trText;
-    final hedefBaslik = bsToTr
-        ? "→ Türkçe çevirini yaz"
-        : "→ Boşnakça / BHS çevirini yaz";
-
-    return Padding(
-      padding: const EdgeInsets.all(16),
-      child: ListView(
-        children: [
-          // mod değiştir
-          Row(
-            children: [
-              Expanded(
-                child: Text(
-                  bsToTr
-                      ? "Boşnakça → Türkçe"
-                      : "Türkçe → Boşnakça",
-                  style: const TextStyle(
-                    fontWeight: FontWeight.w600,
-                    fontSize: 16,
-                  ),
-                ),
-              ),
-              ElevatedButton(
-                onPressed: _toggleMode,
-                child: const Text("Yönü Değiştir"),
-              ),
-            ],
-          ),
-          const SizedBox(height: 16),
-
-          // Kaynak paragraf kartı
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    "Kaynak Metin:",
-                    style: TextStyle(
-                      fontSize: 14,
-                      color: Colors.grey.withOpacity(0.8),
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    kaynakMetin,
-                    style: const TextStyle(
-                      fontSize: 15,
-                      height: 1.4,
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  Text(
-                    hedefBaslik,
-                    style: const TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-          const SizedBox(height: 12),
-
-          // Senin çevirin
-          SizedBox(
-            height: 120,
-            child: TextField(
-              controller: _cevapCtrl,
-              expands: true,
-              maxLines: null,
-              decoration: const InputDecoration(
-                labelText: "Senin çevirin / cevabın",
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.all(Radius.circular(12)),
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(height: 12),
-
-          ElevatedButton.icon(
-            onPressed: _kontrolEt,
-            icon: const Icon(Icons.check),
-            label: const Text("Kontrol Et"),
-          ),
-          const SizedBox(height: 16),
-
-          // Sonuç kartları
-          if (_lastUserAnswer.isNotEmpty)
-            Card(
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      "Senin Cevabın:",
-                      style: TextStyle(
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(height: 6),
-                    Text(
-                      _lastUserAnswer,
-                      style: const TextStyle(fontSize: 14, height: 1.4),
-                    ),
-                    const SizedBox(height: 12),
-                    const Text(
-                      "Skor:",
-                      style: TextStyle(
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(height: 6),
-                    Text(
-                      _lastScoreText,
-                      style: const TextStyle(
-                        fontSize: 14,
-                        height: 1.4,
-                        color: Colors.grey,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-}
-/// ------------------------------------------------------------
-/// PADEŽ ALANI SAYFASI
-/// - Çoktan seçmeli
-/// - Yanlışta açıklama gösteriyor (ör: u + akuzativ = nereye?)
-/// - Skor sayacı var
-/// ------------------------------------------------------------
-class PadezPage extends StatefulWidget {
-  const PadezPage({super.key});
-
-  @override
-  State<PadezPage> createState() => _PadezPageState();
-}
-
-class _PadezPageState extends State<PadezPage> {
-  final Random _rnd = Random();
-
-  QuizQuestion? current;
-  int dogru = 0;
-  int toplam = 0;
+  // Seçili referansın hedef tarafını burada tutuyoruz (karşılaştırma için)
+  String? _currentTargetRaw;
 
   @override
   void initState() {
     super.initState();
-    current = _next();
+    _load();
   }
 
-  QuizQuestion _next() {
-    return padezSorular[_rnd.nextInt(padezSorular.length)];
+  Future<void> _load() async {
+    setState(() => loading = true);
+    try {
+      pairs = await widget.repo.fetchTextPairs(limit: 1000);
+    } catch (e) {
+      _snack(context, 'Hata: $e');
+    } finally {
+      setState(() => loading = false);
+    }
   }
 
-  void _answer(int idx) {
-    if (current == null) return;
-    final ok = idx == current!.correct;
+  void _pickRef() {
+    if (pairs.isEmpty) {
+      _snack(context, 'Önce Kelime Ekle > Çeviri’den örnek metin ekleyin.');
+      return;
+    }
+    final p = pairs[Random().nextInt(pairs.length)];
+    // Yöne göre kaynak ve hedef belirle
+    final source = bosToTr ? p.bos : p.tr;
+    final target = bosToTr ? p.tr : p.bos;
 
-    setState(() {
-      toplam++;
-      if (ok) dogru++;
-    });
+    src.text = source;
+    _currentTargetRaw = target;
 
-    if (ok) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text("Tačno ✅"),
-          duration: Duration(milliseconds: 800),
-        ),
-      );
-    } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            "Netačno ❌ Doğru: ${current!.options[current!.correct]}\nNot: ${current!.explanation ?? ""}",
-          ),
-          duration: const Duration(milliseconds: 1500),
-        ),
-      );
+    // Yeni örnekle başlıyoruz: kullanıcı alanını ve sonucu temizle
+    user.clear();
+    setState(() {});
+  }
+
+  // Temiz normalizasyon: noktalama, büyük/küçük harf farkını yok say
+  String _norm(String s) {
+    final lower = s.toLowerCase();
+    final cleaned =
+        lower.replaceAll(RegExp(r'[^\p{L}\p{N}\s]+', unicode: true), ' ');
+    return cleaned.split(RegExp(r'\s+')).where((e) => e.isNotEmpty).join(' ');
+  }
+
+  String _langName(bool isBos) => isBos ? 'Boşnakça' : 'Türkçe';
+
+  void _check() {
+    if (src.text.trim().isEmpty || _currentTargetRaw == null) {
+      _snack(context, 'Önce “Ref’ten getir” ile kaynak metni çekin.');
+      return;
+    }
+    if (user.text.trim().isEmpty) {
+      _snack(context, 'Lütfen çevirinizi yazın.');
+      return;
     }
 
-    setState(() {
-      current = _next();
-    });
+    final userN = _norm(user.text);
+    final targetN = _norm(_currentTargetRaw!);
+
+    final uTok = userN.split(' ');
+    final tTok = targetN.split(' ');
+    final uSet = Set<String>.from(uTok);
+    final tSet = Set<String>.from(tTok);
+
+    final correct = uSet.intersection(tSet).length;
+    final total = tSet.isEmpty ? 1 : tSet.length;
+    final percent = ((correct * 100) / total).round();
+
+    final wrong = uSet.difference(tSet).toList();
+    final missing = tSet.difference(uSet).toList();
+
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Sonuç'),
+        content: SingleChildScrollView(
+          child: Text(
+            'Doğruluk: %$percent\n'
+            'Yanlış/Yabancı: ${wrong.isEmpty ? '-' : wrong.join(', ')}\n'
+            'Eksik: ${missing.isEmpty ? '-' : missing.join(', ')}',
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Kapat')),
+        ],
+      ),
+    );
+  }
+
+  void _onDirectionChanged(bool toBosFromTr) {
+    // yön değişince alanları temizle, karışıklık olmasın
+    bosToTr = toBosFromTr;
+    src.clear();
+    user.clear();
+    _currentTargetRaw = null;
+    setState(() {});
   }
 
   @override
   Widget build(BuildContext context) {
-    if (current == null) {
-      return const Center(child: Text("Soru yok"));
-    }
-
-    final q = current!;
-    final pct = toplam == 0 ? 0 : ((dogru / toplam) * 100).round();
-
-    return Padding(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        children: [
-          Text(
-            "Doğru: $dogru / Toplam: $toplam (%$pct)",
-            style: TextStyle(
-              fontWeight: FontWeight.w600,
-              color: Colors.grey.withOpacity(0.9),
-            ),
-          ),
-          const SizedBox(height: 16),
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Text(
-                q.prompt,
-                style: const TextStyle(
-                  fontSize: 20,
-                  fontWeight: FontWeight.w600,
-                ),
-                textAlign: TextAlign.center,
-              ),
-            ),
-          ),
-          const SizedBox(height: 16),
-          for (int i = 0; i < q.options.length; i++)
-            Card(
-              child: ListTile(
-                title: Text(q.options[i]),
-                onTap: () => _answer(i),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-}
-
-/// ------------------------------------------------------------
-/// ADMIN PANELİ
-/// Herkes admin gibi. Buradan veri ekleniyor.
-/// Sekmeler:
-///  - Kelime
-///  - Ezber (çoktan seçmeli kelime sorusu)
-///  - Boşluk Doldur
-///  - Soru Zarfı
-///  - Padež
-///  - Çeviri (paragraf ekleme)
-///
-/// Not:
-///  - Boş bırakılamaz alanlar için basic kontrol koydum:
-///    eğer boşsa SnackBar ile uyarı veriyoruz ("Bu alan boş bırakılamaz")
-/// ------------------------------------------------------------
-class AdminPage extends StatefulWidget {
-  const AdminPage({super.key});
-
-  @override
-  State<AdminPage> createState() => _AdminPageState();
-}
-
-class _AdminPageState extends State<AdminPage>
-    with SingleTickerProviderStateMixin {
-  late TabController _tab;
-
-  // --- Kelime ekleme controllerları ---
-  final TextEditingController kelimeBosCtrl = TextEditingController();
-  final TextEditingController kelimeTrCtrl = TextEditingController();
-  final TextEditingController kelimeTurCtrl = TextEditingController();
-  final TextEditingController kelimeCinsCtrl = TextEditingController();
-  final TextEditingController kelimeOrnekCtrl = TextEditingController();
-
-  // toplu kelime ekleme (format: bs; tr; tür; örnek; cinsiyet)
-  final TextEditingController kelimeTopluCtrl = TextEditingController();
-
-  // --- Ezber Yap soru ekleme (çoktan seçmeli) ---
-  final TextEditingController ezberSoruCtrl = TextEditingController();
-  final TextEditingController ezberOpt1Ctrl = TextEditingController();
-  final TextEditingController ezberOpt2Ctrl = TextEditingController();
-  final TextEditingController ezberOpt3Ctrl = TextEditingController();
-  final TextEditingController ezberOpt4Ctrl = TextEditingController();
-  final TextEditingController ezberDogruIndexCtrl = TextEditingController();
-  // mode seçimi: bsToTr mı trToBs mi?
-  QuizMode ezberMode = QuizMode.bsToTr;
-
-  // toplu quiz ekleme
-  final TextEditingController ezberTopluCtrl = TextEditingController();
-
-  // --- Boşluk Doldur ekleme ---
-  final TextEditingController boslukSoruCtrl = TextEditingController();
-  final TextEditingController boslukCevapCtrl = TextEditingController();
-
-  // toplu boşluk doldur ekleme (sen istedin)
-  // format: soru|||cevap (her satır bir tane)
-  final TextEditingController boslukTopluCtrl = TextEditingController();
-
-  // --- Soru Zarfı ekleme ---
-  final TextEditingController soruZarfSoruCtrl = TextEditingController();
-  final TextEditingController soruZarf1Ctrl = TextEditingController();
-  final TextEditingController soruZarf2Ctrl = TextEditingController();
-  final TextEditingController soruZarf3Ctrl = TextEditingController();
-  final TextEditingController soruZarf4Ctrl = TextEditingController();
-  final TextEditingController soruZarfDogruCtrl = TextEditingController();
-
-  // --- Padež soru ekleme ---
-  final TextEditingController padezSoruCtrl = TextEditingController();
-  final TextEditingController padez1Ctrl = TextEditingController();
-  final TextEditingController padez2Ctrl = TextEditingController();
-  final TextEditingController padez3Ctrl = TextEditingController();
-  final TextEditingController padez4Ctrl = TextEditingController();
-  final TextEditingController padezDogruCtrl = TextEditingController();
-  final TextEditingController padezAciklamaCtrl = TextEditingController();
-
-  // toplu padez ekleme
-  // format: soru | şık1 | şık2 | şık3 | şık4 | doğruIndex | açıklama
-  final TextEditingController padezTopluCtrl = TextEditingController();
-
-  // --- Çeviri paragraf ekleme (senin uzun metnin) ---
-  final TextEditingController parBosCtrl = TextEditingController();
-  final TextEditingController parTrCtrl = TextEditingController();
-
-  @override
-  void initState() {
-    super.initState();
-    _tab = TabController(length: 6, vsync: this);
-  }
-
-  @override
-  void dispose() {
-    _tab.dispose();
-    // dispose controllerlar
-    kelimeBosCtrl.dispose();
-    kelimeTrCtrl.dispose();
-    kelimeTurCtrl.dispose();
-    kelimeCinsCtrl.dispose();
-    kelimeOrnekCtrl.dispose();
-    kelimeTopluCtrl.dispose();
-
-    ezberSoruCtrl.dispose();
-    ezberOpt1Ctrl.dispose();
-    ezberOpt2Ctrl.dispose();
-    ezberOpt3Ctrl.dispose();
-    ezberOpt4Ctrl.dispose();
-    ezberDogruIndexCtrl.dispose();
-    ezberTopluCtrl.dispose();
-
-    boslukSoruCtrl.dispose();
-    boslukCevapCtrl.dispose();
-    boslukTopluCtrl.dispose();
-
-    soruZarfSoruCtrl.dispose();
-    soruZarf1Ctrl.dispose();
-    soruZarf2Ctrl.dispose();
-    soruZarf3Ctrl.dispose();
-    soruZarf4Ctrl.dispose();
-    soruZarfDogruCtrl.dispose();
-
-    padezSoruCtrl.dispose();
-    padez1Ctrl.dispose();
-    padez2Ctrl.dispose();
-    padez3Ctrl.dispose();
-    padez4Ctrl.dispose();
-    padezDogruCtrl.dispose();
-    padezAciklamaCtrl.dispose();
-    padezTopluCtrl.dispose();
-
-    parBosCtrl.dispose();
-    parTrCtrl.dispose();
-    super.dispose();
-  }
-
-  void _snack(String msg) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(msg),
-        duration: const Duration(milliseconds: 1200),
-      ),
-    );
-  }
-
-  // ---------- Kelime ekle (tekli)
-  void _ekleKelimeTekli() {
-    if (kelimeBosCtrl.text.trim().isEmpty ||
-        kelimeTrCtrl.text.trim().isEmpty ||
-        kelimeTurCtrl.text.trim().isEmpty) {
-      _snack("Boşnakça / Türkçe / tür boş bırakılamaz");
-      return;
-    }
-
-    kelimeListesi.add(
-      KelimeEntry(
-        bos: kelimeBosCtrl.text.trim(),
-        tr: kelimeTrCtrl.text.trim(),
-        tur: kelimeTurCtrl.text.trim(),
-        cinsiyet: kelimeCinsCtrl.text.trim().isEmpty
-            ? null
-            : kelimeCinsCtrl.text.trim(),
-        ornek: kelimeOrnekCtrl.text.trim().isEmpty
-            ? null
-            : kelimeOrnekCtrl.text.trim(),
-      ),
-    );
-
-    kelimeBosCtrl.clear();
-    kelimeTrCtrl.clear();
-    kelimeTurCtrl.clear();
-    kelimeCinsCtrl.clear();
-    kelimeOrnekCtrl.clear();
-
-    _snack("Kelime eklendi ✅");
-    setState(() {});
-  }
-
-  // ---------- Kelime ekle (toplu)
-  // format her satır:
-  // bos; tr; tür; örnek cümle; cinsiyet
-  void _ekleKelimeToplu() {
-    final raw = kelimeTopluCtrl.text.trim();
-    if (raw.isEmpty) {
-      _snack("Toplu alan boş");
-      return;
-    }
-
-    final lines = raw.split('\n');
-    for (final line in lines) {
-      final parts = line.split(';');
-      if (parts.length < 3) {
-        // en az bos,tr,tür lazım
-        continue;
-      }
-      final bos = parts[0].trim();
-      final tr = parts[1].trim();
-      final tur = parts[2].trim();
-      final ornek = parts.length > 3 ? parts[3].trim() : "";
-      final cins = parts.length > 4 ? parts[4].trim() : "";
-
-      if (bos.isEmpty || tr.isEmpty || tur.isEmpty) {
-        // zorunlu boşsa atla
-        continue;
-      }
-
-      kelimeListesi.add(
-        KelimeEntry(
-          bos: bos,
-          tr: tr,
-          tur: tur,
-          ornek: ornek.isEmpty ? null : ornek,
-          cinsiyet: cins.isEmpty ? null : cins,
-        ),
-      );
-    }
-
-    kelimeTopluCtrl.clear();
-    _snack("Toplu kelime eklendi ✅");
-    setState(() {});
-  }
-
-  // ---------- Ezber Yap soru ekle (tekli)
-  void _ekleEzberTekli() {
-    if (ezberSoruCtrl.text.trim().isEmpty ||
-        ezberOpt1Ctrl.text.trim().isEmpty ||
-        ezberOpt2Ctrl.text.trim().isEmpty ||
-        ezberOpt3Ctrl.text.trim().isEmpty ||
-        ezberOpt4Ctrl.text.trim().isEmpty ||
-        ezberDogruIndexCtrl.text.trim().isEmpty) {
-      _snack("Boş alan var (soru/4 şık/doğru index)");
-      return;
-    }
-
-    final idx = int.tryParse(ezberDogruIndexCtrl.text.trim());
-    if (idx == null || idx < 0 || idx > 3) {
-      _snack("Doğru index 0-3 olmalı");
-      return;
-    }
-
-    ezberSorular.add(
-      QuizQuestion(
-        prompt: ezberSoruCtrl.text.trim(),
-        options: [
-          ezberOpt1Ctrl.text.trim(),
-          ezberOpt2Ctrl.text.trim(),
-          ezberOpt3Ctrl.text.trim(),
-          ezberOpt4Ctrl.text.trim(),
-        ],
-        correct: idx,
-        mode: ezberMode,
-      ),
-    );
-
-    ezberSoruCtrl.clear();
-    ezberOpt1Ctrl.clear();
-    ezberOpt2Ctrl.clear();
-    ezberOpt3Ctrl.clear();
-    ezberOpt4Ctrl.clear();
-    ezberDogruIndexCtrl.clear();
-
-    _snack("Ezber sorusu eklendi ✅");
-    setState(() {});
-  }
-
-  // ---------- Ezber Yap soru ekle (toplu)
-  // format:
-  // soru | şık1 | şık2 | şık3 | şık4 | doğruIndex(0-3)
-  void _ekleEzberToplu() {
-    final raw = ezberTopluCtrl.text.trim();
-    if (raw.isEmpty) {
-      _snack("Toplu alan boş");
-      return;
-    }
-    final lines = raw.split('\n');
-    for (final line in lines) {
-      final parts = line.split('|');
-      if (parts.length < 6) continue;
-
-      final soru = parts[0].trim();
-      final o1 = parts[1].trim();
-      final o2 = parts[2].trim();
-      final o3 = parts[3].trim();
-      final o4 = parts[4].trim();
-      final idx = int.tryParse(parts[5].trim()) ?? -1;
-      if (soru.isEmpty || o1.isEmpty || o2.isEmpty || o3.isEmpty || o4.isEmpty) {
-        continue;
-      }
-      if (idx < 0 || idx > 3) continue;
-
-      ezberSorular.add(
-        QuizQuestion(
-          prompt: soru,
-          options: [o1, o2, o3, o4],
-          correct: idx,
-          mode: ezberMode,
-        ),
-      );
-    }
-
-    ezberTopluCtrl.clear();
-    _snack("Toplu Ezber soruları eklendi ✅");
-    setState(() {});
-  }
-
-  // ---------- Boşluk Doldur ekle (tekli)
-  void _ekleBoslukTekli() {
-    if (boslukSoruCtrl.text.trim().isEmpty ||
-        boslukCevapCtrl.text.trim().isEmpty) {
-      _snack("Soru veya cevap boş olamaz");
-      return;
-    }
-
-    boslukSorular.add(
-      ClozeQuestion(
-        questionText: boslukSoruCtrl.text.trim(),
-        answer: boslukCevapCtrl.text.trim(),
-      ),
-    );
-
-    boslukSoruCtrl.clear();
-    boslukCevapCtrl.clear();
-
-    _snack("Boşluk doldur sorusu eklendi ✅");
-    setState(() {});
-  }
-
-  // ---------- Boşluk Doldur ekle (toplu)
-  // her satır: SORU|||CEVAP
-  void _ekleBoslukToplu() {
-    final raw = boslukTopluCtrl.text.trim();
-    if (raw.isEmpty) {
-      _snack("Toplu boşluk doldur alanı boş");
-      return;
-    }
-    final lines = raw.split('\n');
-    for (final line in lines) {
-      final parts = line.split("|||");
-      if (parts.length < 2) continue;
-      final soru = parts[0].trim();
-      final cevap = parts[1].trim();
-      if (soru.isEmpty || cevap.isEmpty) continue;
-      boslukSorular.add(
-        ClozeQuestion(
-          questionText: soru,
-          answer: cevap,
-        ),
-      );
-    }
-
-    boslukTopluCtrl.clear();
-    _snack("Toplu boşluk doldur soruları eklendi ✅");
-    setState(() {});
-  }
-
-  // ---------- Soru Zarfı ekle (tekli)
-  void _ekleSoruZarfiTekli() {
-    if (soruZarfSoruCtrl.text.trim().isEmpty ||
-        soruZarf1Ctrl.text.trim().isEmpty ||
-        soruZarf2Ctrl.text.trim().isEmpty ||
-        soruZarf3Ctrl.text.trim().isEmpty ||
-        soruZarf4Ctrl.text.trim().isEmpty ||
-        soruZarfDogruCtrl.text.trim().isEmpty) {
-      _snack("Boş alan var (soru/4 şık/doğru index)");
-      return;
-    }
-
-    final idx = int.tryParse(soruZarfDogruCtrl.text.trim());
-    if (idx == null || idx < 0 || idx > 3) {
-      _snack("Doğru index 0-3 olmalı");
-      return;
-    }
-
-    soruZarfSorular.add(
-      QuizQuestion(
-        prompt: soruZarfSoruCtrl.text.trim(),
-        options: [
-          soruZarf1Ctrl.text.trim(),
-          soruZarf2Ctrl.text.trim(),
-          soruZarf3Ctrl.text.trim(),
-          soruZarf4Ctrl.text.trim(),
-        ],
-        correct: idx,
-        mode: QuizMode.soruZarfi,
-      ),
-    );
-
-    soruZarfSoruCtrl.clear();
-    soruZarf1Ctrl.clear();
-    soruZarf2Ctrl.clear();
-    soruZarf3Ctrl.clear();
-    soruZarf4Ctrl.clear();
-    soruZarfDogruCtrl.clear();
-
-    _snack("Soru Zarfı sorusu eklendi ✅");
-    setState(() {});
-  }
-
-  // ---------- Padež ekle (tekli)
-  void _eklePadezTekli() {
-    if (padezSoruCtrl.text.trim().isEmpty ||
-        padez1Ctrl.text.trim().isEmpty ||
-        padez2Ctrl.text.trim().isEmpty ||
-        padez3Ctrl.text.trim().isEmpty ||
-        padez4Ctrl.text.trim().isEmpty ||
-        padezDogruCtrl.text.trim().isEmpty) {
-      _snack("Boş alan var (soru/4 şık/doğru index)");
-      return;
-    }
-
-    final idx = int.tryParse(padezDogruCtrl.text.trim());
-    if (idx == null || idx < 0 || idx > 3) {
-      _snack("Doğru index 0-3 olmalı");
-      return;
-    }
-
-    padezSorular.add(
-      QuizQuestion(
-        prompt: padezSoruCtrl.text.trim(),
-        options: [
-          padez1Ctrl.text.trim(),
-          padez2Ctrl.text.trim(),
-          padez3Ctrl.text.trim(),
-          padez4Ctrl.text.trim(),
-        ],
-        correct: idx,
-        mode: QuizMode.padez,
-        explanation: padezAciklamaCtrl.text.trim(),
-      ),
-    );
-
-    padezSoruCtrl.clear();
-    padez1Ctrl.clear();
-    padez2Ctrl.clear();
-    padez3Ctrl.clear();
-    padez4Ctrl.clear();
-    padezDogruCtrl.clear();
-    padezAciklamaCtrl.clear();
-
-    _snack("Padež sorusu eklendi ✅");
-    setState(() {});
-  }
-
-  // ---------- Padež ekle (toplu)
-  // format:
-  // soru | şık1 | şık2 | şık3 | şık4 | doğruIndex(0-3) | açıklama
-  void _eklePadezToplu() {
-    final raw = padezTopluCtrl.text.trim();
-    if (raw.isEmpty) {
-      _snack("Toplu padež alanı boş");
-      return;
-    }
-
-    final lines = raw.split('\n');
-    for (final line in lines) {
-      final parts = line.split('|');
-      if (parts.length < 7) continue;
-
-      final soru = parts[0].trim();
-      final o1 = parts[1].trim();
-      final o2 = parts[2].trim();
-      final o3 = parts[3].trim();
-      final o4 = parts[4].trim();
-      final idx = int.tryParse(parts[5].trim()) ?? -1;
-      final acik = parts[6].trim();
-
-      if (soru.isEmpty ||
-          o1.isEmpty ||
-          o2.isEmpty ||
-          o3.isEmpty ||
-          o4.isEmpty ||
-          idx < 0 ||
-          idx > 3) {
-        continue;
-      }
-
-      padezSorular.add(
-        QuizQuestion(
-          prompt: soru,
-          options: [o1, o2, o3, o4],
-          correct: idx,
-          mode: QuizMode.padez,
-          explanation: acik,
-        ),
-      );
-    }
-
-    padezTopluCtrl.clear();
-    _snack("Toplu Padež soruları eklendi ✅");
-    setState(() {});
-  }
-
-  // ---------- Çeviri paragraf ekle
-  // Burada 2 alan da zorunlu!
-  void _ekleParagraf() {
-    if (parBosCtrl.text.trim().isEmpty ||
-        parTrCtrl.text.trim().isEmpty) {
-      _snack("Bu alan boş bırakılamaz (iki dil de lazım)");
-      return;
-    }
-
-    ceviriParagraflari.add(
-      StudyParagraph(
-        bosText: parBosCtrl.text.trim(),
-        trText: parTrCtrl.text.trim(),
-      ),
-    );
-
-    parBosCtrl.clear();
-    parTrCtrl.clear();
-
-    _snack("Paragraf eklendi ✅ (Çeviri Yap sekmesinde göreceksin)");
-    setState(() {});
-  }
-
-  Widget _sectionTitle(String text) {
-    return Padding(
-      padding: const EdgeInsets.only(top: 16, bottom: 8),
-      child: Text(
-        text,
-        style: const TextStyle(
-          fontWeight: FontWeight.w700,
-          fontSize: 16,
-        ),
-      ),
-    );
-  }
-
-  Widget _textField(
-    TextEditingController c,
-    String label, {
-    int maxLines = 1,
-  }) {
-    return TextField(
-      controller: c,
-      maxLines: maxLines,
-      decoration: InputDecoration(
-        labelText: label,
-        border: const OutlineInputBorder(
-          borderRadius: BorderRadius.all(Radius.circular(12)),
-        ),
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return DefaultTabController(
-      length: 6,
-      child: Scaffold(
-        appBar: AppBar(
-          title: const Text("Admin Paneli"),
-          bottom: TabBar(
-            controller: _tab,
-            isScrollable: true,
-            tabs: const [
-              Tab(text: "Kelime"),
-              Tab(text: "Ezber"),
-              Tab(text: "Boşluk"),
-              Tab(text: "Zarf"),
-              Tab(text: "Padež"),
-              Tab(text: "Çeviri"),
-            ],
-          ),
-        ),
-        body: TabBarView(
-          controller: _tab,
-          children: [
-            // ---- TAB 1: Kelime ----
-            ListView(
-              padding: const EdgeInsets.all(16),
+    final srcLangName = _langName(bosToTr);        // Bos→Tr ise kaynak Boşnakça
+    final dstLangName = _langName(!bosToTr);       // hedef Türkçe
+    return loading
+        ? const Center(child: CircularProgressIndicator())
+        : Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
               children: [
-                _sectionTitle("Tekli Kelime Ekle"),
-                _textField(kelimeBosCtrl, "Boşnakça"),
-                const SizedBox(height: 8),
-                _textField(kelimeTrCtrl, "Türkçe"),
-                const SizedBox(height: 8),
-                _textField(kelimeTurCtrl, "Tür (isim/fiil/sıfat/zarf/ifade)"),
-                const SizedBox(height: 8),
-                _textField(kelimeCinsCtrl, "Cinsiyet (m/f/n) opsiyonel"),
-                const SizedBox(height: 8),
-                _textField(kelimeOrnekCtrl, "Örnek cümle (opsiyonel)",
-                    maxLines: 2),
-                const SizedBox(height: 8),
-                ElevatedButton.icon(
-                  onPressed: _ekleKelimeTekli,
-                  icon: const Icon(Icons.add),
-                  label: const Text("Kelimeyi Ekle"),
-                ),
-                const SizedBox(height: 24),
-
-                _sectionTitle("Toplu Kelime Ekle"),
-                const Text(
-                    "Format (her satır): bos; tr; tür; örnek; cinsiyet\n"
-                    "örnek ve cinsiyet opsiyonel"),
-                const SizedBox(height: 8),
-                _textField(kelimeTopluCtrl, "Çoklu giriş", maxLines: 5),
-                const SizedBox(height: 16),
-                ElevatedButton.icon(
-                  onPressed: _ekleKelimeToplu,
-                  icon: const Icon(Icons.cloud_upload),
-                  label: const Text("Toplu Kelime Yükle"),
-                ),
-              ],
-            ),
-
-            // ---- TAB 2: Ezber ----
-            ListView(
-              padding: const EdgeInsets.all(16),
-              children: [
-                _sectionTitle("Tekli Ezber Sorusu Ekle"),
-                _textField(ezberSoruCtrl, "Soru (ör: hljeb / ekmek ...)"),
-                const SizedBox(height: 8),
-                _textField(ezberOpt1Ctrl, "Şık 1"),
-                const SizedBox(height: 8),
-                _textField(ezberOpt2Ctrl, "Şık 2"),
-                const SizedBox(height: 8),
-                _textField(ezberOpt3Ctrl, "Şık 3"),
-                const SizedBox(height: 8),
-                _textField(ezberOpt4Ctrl, "Şık 4"),
-                const SizedBox(height: 8),
-                _textField(ezberDogruIndexCtrl, "Doğru index (0-3)"),
-                const SizedBox(height: 8),
-
-                // mode seçimi
+                // Yön seçimi + Ref'ten getir
                 Row(
                   children: [
-                    const Text("Soru Tipi: "),
-                    DropdownButton<QuizMode>(
-                      value: ezberMode,
-                      items: const [
-                        DropdownMenuItem(
-                          value: QuizMode.bsToTr,
-                          child: Text("Boşnakça → Türkçe"),
-                        ),
-                        DropdownMenuItem(
-                          value: QuizMode.trToBs,
-                          child: Text("Türkçe → Boşnakça"),
-                        ),
+                    const Text('Yön:'),
+                    const SizedBox(width: 8),
+                    SegmentedButton<bool>(
+                      segments: const [
+                        ButtonSegment(value: true, label: Text('Bos → Tr')),
+                        ButtonSegment(value: false, label: Text('Tr → Bos')),
                       ],
-                      onChanged: (v) {
-                        if (v != null) {
-                          setState(() {
-                            ezberMode = v;
-                          });
-                        }
-                      },
+                      selected: {bosToTr},
+                      onSelectionChanged: (s) => _onDirectionChanged(s.first),
+                    ),
+                    const Spacer(),
+                    FilledButton.icon(
+                      icon: const Icon(Icons.auto_fix_high),
+                      onPressed: _pickRef,
+                      label: const Text('Ref’ten getir'),
                     ),
                   ],
                 ),
-                const SizedBox(height: 16),
-                ElevatedButton.icon(
-                  onPressed: _ekleEzberTekli,
-                  icon: const Icon(Icons.add),
-                  label: const Text("Ezber Sorusunu Ekle"),
-                ),
-                const SizedBox(height: 24),
+                const SizedBox(height: 12),
 
-                _sectionTitle("Toplu Ezber Sorusu Ekle"),
-                const Text(
-                    "Format (her satır):\n"
-                    "soru | şık1 | şık2 | şık3 | şık4 | doğruIndex(0-3)\n"
-                    "Bu, seçili mod (Boşnakça→TR / Türkçe→BS) ile kaydedilir."),
-                const SizedBox(height: 8),
-                _textField(ezberTopluCtrl, "Çoklu giriş", maxLines: 5),
-                const SizedBox(height: 16),
-                ElevatedButton.icon(
-                  onPressed: _ekleEzberToplu,
-                  icon: const Icon(Icons.cloud_upload),
-                  label: const Text("Toplu Ezber Sorusu Yükle"),
+                // Kaynak ve Kullanıcı Çevirisi alanları (sade, geniş)
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: src,
+                        minLines: 5,
+                        maxLines: 10,
+                        readOnly: true, // Kaynak kullanıcı tarafından yazılmıyor
+                        decoration: InputDecoration(
+                          labelText: 'Kaynak metin ($srcLangName)',
+                          hintText: '“Ref’ten getir”e basarak doldurun',
+                          border: const OutlineInputBorder(),
+                          suffixIcon: src.text.isEmpty
+                              ? null
+                              : IconButton(
+                                  onPressed: () => setState(() => src.clear()),
+                                  icon: const Icon(Icons.clear),
+                                  tooltip: 'Temizle',
+                                ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: TextField(
+                        controller: user,
+                        minLines: 5,
+                        maxLines: 10,
+                        decoration: InputDecoration(
+                          labelText: 'Çeviriniz (${dstLangName})',
+                          hintText: '${srcLangName} metni buraya ${dstLangName} olarak çevirin',
+                          border: const OutlineInputBorder(),
+                          suffixIcon: user.text.isEmpty
+                              ? null
+                              : IconButton(
+                                  onPressed: () => setState(() => user.clear()),
+                                  icon: const Icon(Icons.clear),
+                                  tooltip: 'Temizle',
+                                ),
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
+
+                const SizedBox(height: 12),
+                FilledButton(
+                  onPressed: _check,
+                  child: const Text('Kontrol Et'),
+                ),
+
+                // İstenerek boş bırakıldı: altta referans listesi yok.
+                // Ekran sade kalsın; sadece kaynak, çeviri, kontrol.
               ],
             ),
+          );
+  }
+}
 
-            // ---- TAB 3: Boşluk ----
-            ListView(
-              padding: const EdgeInsets.all(16),
-              children: [
-                _sectionTitle("Boşluk Doldur (Tekli)"),
-                _textField(boslukSoruCtrl, "Soru metni (Ja pijem ____.)",
-                    maxLines: 2),
-                const SizedBox(height: 8),
-                _textField(boslukCevapCtrl, "Doğru cevap"),
-                const SizedBox(height: 16),
-                ElevatedButton.icon(
-                  onPressed: _ekleBoslukTekli,
-                  icon: const Icon(Icons.add),
-                  label: const Text("Boşluk Sorusunu Ekle"),
-                ),
-                const SizedBox(height: 24),
 
-                _sectionTitle("Boşluk Doldur (Toplu)"),
-                const Text(
-                    "Format (her satır):\n"
-                    "SORU|||CEVAP\n"
-                    "Örnek:\n"
-                    "Ja pijem ____.|||vodu"),
-                const SizedBox(height: 8),
-                _textField(boslukTopluCtrl, "Çoklu giriş", maxLines: 5),
-                const SizedBox(height: 16),
-                ElevatedButton.icon(
-                  onPressed: _ekleBoslukToplu,
-                  icon: const Icon(Icons.cloud_upload),
-                  label: const Text("Toplu Boşluk Sorusu Yükle"),
-                ),
-              ],
-            ),
-
-            // ---- TAB 4: Zarf ----
-            ListView(
-              padding: const EdgeInsets.all(16),
-              children: [
-                _sectionTitle("Soru Zarfı Sorusu (Tekli)"),
-                _textField(
-                    soruZarfSoruCtrl, "Soru (_____ živiš? gibi)", maxLines: 2),
-                const SizedBox(height: 8),
-                _textField(soruZarf1Ctrl, "Şık 1 (Gdje vb)"),
-                const SizedBox(height: 8),
-                _textField(soruZarf2Ctrl, "Şık 2"),
-                const SizedBox(height: 8),
-                _textField(soruZarf3Ctrl, "Şık 3"),
-                const SizedBox(height: 8),
-                _textField(soruZarf4Ctrl, "Şık 4"),
-                const SizedBox(height: 8),
-                _textField(soruZarfDogruCtrl, "Doğru index (0-3)"),
-                const SizedBox(height: 16),
-                ElevatedButton.icon(
-                  onPressed: _ekleSoruZarfiTekli,
-                  icon: const Icon(Icons.add),
-                  label: const Text("Zarf Sorusunu Ekle"),
-                ),
-              ],
-            ),
-
-            // ---- TAB 5: Padež ----
-            ListView(
-              padding: const EdgeInsets.all(16),
-              children: [
-                _sectionTitle("Padež Sorusu (Tekli)"),
-                _textField(padezSoruCtrl, "Soru (Idem u školu. Hangi hâl?)",
-                    maxLines: 2),
-                const SizedBox(height: 8),
-                _textField(padez1Ctrl, "Şık 1"),
-                const SizedBox(height: 8),
-                _textField(padez2Ctrl, "Şık 2"),
-                const SizedBox(height: 8),
-                _textField(padez3Ctrl, "Şık 3"),
-                const SizedBox(height: 8),
-                _textField(padez4Ctrl, "Şık 4"),
-                const SizedBox(height: 8),
-                _textField(padezDogruCtrl, "Doğru index (0-3)"),
-                const SizedBox(height: 8),
-                _textField(padezAciklamaCtrl, "Açıklama (u + akuzativ ...)",
-                    maxLines: 2),
-                const SizedBox(height: 16),
-                ElevatedButton.icon(
-                  onPressed: _eklePadezTekli,
-                  icon: const Icon(Icons.add),
-                  label: const Text("Padež Sorusunu Ekle"),
-                ),
-                const SizedBox(height: 24),
-
-                _sectionTitle("Padež Sorusu (Toplu)"),
-                const Text(
-                    "Format (her satır):\n"
-                    "soru | şık1 | şık2 | şık3 | şık4 | doğruIndex(0-3) | açıklama"),
-                const SizedBox(height: 8),
-                _textField(padezTopluCtrl, "Çoklu giriş", maxLines: 5),
-                const SizedBox(height: 16),
-                ElevatedButton.icon(
-                  onPressed: _eklePadezToplu,
-                  icon: const Icon(Icons.cloud_upload),
-                  label: const Text("Toplu Padež Yükle"),
-                ),
-              ],
-            ),
-
-            // ---- TAB 6: Çeviri ----
-            ListView(
-              padding: const EdgeInsets.all(16),
-              children: [
-                _sectionTitle("Paragraf Ekle (Çeviri Pratiği)"),
-                const Text(
-                    "ÜST alan: Boşnakça / BHS metin\n"
-                    "ALT alan: Türkçe doğru çeviri\n"
-                    "İkisi de boş OLAMAZ."),
-                const SizedBox(height: 8),
-                _textField(parBosCtrl, "Boşnakça / BHS paragraf", maxLines: 5),
-                const SizedBox(height: 8),
-                _textField(parTrCtrl, "Türkçe paragraf", maxLines: 5),
-                const SizedBox(height: 16),
-                ElevatedButton.icon(
-                  onPressed: _ekleParagraf,
-                  icon: const Icon(Icons.add),
-                  label: const Text("Paragrafı Kaydet"),
-                ),
-              ],
-            ),
-          ],
-        ),
+// Kelime Ekle — 3 alt form: Kelime / Çeviri / Boşluk
+class KelimeEklePage extends StatefulWidget{
+  final Repo repo; const KelimeEklePage({super.key, required this.repo});
+  @override State<KelimeEklePage> createState()=>_KelimeEklePageState();
+}
+class _KelimeEklePageState extends State<KelimeEklePage>{
+  int tab=0;
+  @override Widget build(BuildContext context){
+    final tabs=['Kelime','Çeviri','Boşluk'];
+    return Column(children:[
+      const SizedBox(height:8),
+      ToggleButtons(
+        isSelected:[tab==0,tab==1,tab==2],
+        onPressed:(i)=>setState(()=>tab=i),
+        children: tabs.map((e)=>Padding(
+          padding: const EdgeInsets.symmetric(horizontal:16), child: Text(e))).toList(),
       ),
+      const Divider(),
+      Expanded(child: switch(tab){
+        0 => _KelimeForm(repo:widget.repo),
+        1 => _TextPairForm(repo:widget.repo),
+        _ => _ClozeForm(repo:widget.repo),
+      }),
+    ]);
+  }
+}
+
+// Kelime formu
+class _KelimeForm extends StatefulWidget{
+  final Repo repo; const _KelimeForm({required this.repo});
+  @override State<_KelimeForm> createState()=>_KelimeFormState();
+}
+class _KelimeFormState extends State<_KelimeForm>{
+  final bos=TextEditingController(), tr=TextEditingController(),
+        gender=TextEditingController(), example=TextEditingController(),
+        bulk=TextEditingController();
+  String tur='isim';
+
+  @override Widget build(BuildContext context){
+    return ListView(padding: const EdgeInsets.all(12), children:[
+      Text('Tekli Kelime Ekle', style: Theme.of(context).textTheme.titleMedium),
+      const SizedBox(height:6),
+      TextField(controller:bos, decoration: const InputDecoration(labelText:'Boşnakça')),
+      TextField(controller:tr, decoration: const InputDecoration(labelText:'Türkçe')),
+      DropdownButtonFormField<String>(
+        value:tur, items: const [
+          DropdownMenuItem(value:'isim', child: Text('isim')),
+          DropdownMenuItem(value:'fiil', child: Text('fiil')),
+          DropdownMenuItem(value:'sıfat', child: Text('sıfat')),
+          DropdownMenuItem(value:'zarf', child: Text('zarf')),
+          DropdownMenuItem(value:'ifade', child: Text('ifade')),
+        ],
+        onChanged:(v)=>setState(()=>tur=v??'isim'),
+        decoration: const InputDecoration(labelText:'Tür'),
+      ),
+      TextField(controller:gender, decoration: const InputDecoration(labelText:'Cinsiyet (m/f/n, opsiyonel)')),
+      TextField(controller:example, decoration: const InputDecoration(labelText:'Örnek cümle (opsiyonel)')),
+      const SizedBox(height:6),
+      Align(alignment: Alignment.centerRight, child:
+        FilledButton(onPressed:() async{
+          if (bos.text.trim().isEmpty || tr.text.trim().isEmpty) return;
+          try{
+            await widget.repo.addWord(Word(
+              bos:bos.text.trim(), tr:tr.text.trim(), tur:tur,
+              gender:gender.text.trim(), example:example.text.trim(),
+            ));
+            _snack(context,'Kelime eklendi'); bos.clear(); tr.clear(); gender.clear(); example.clear();
+          }catch(e){ _snack(context,'Hata: $e'); }
+        }, child: const Text('Kelimeyi Ekle')),
+      ),
+      const Divider(height:28),
+      Text('Toplu Kelime Ekle', style: Theme.of(context).textTheme.titleMedium),
+      const SizedBox(height:6),
+      Text('Format (her satır): bos; tr; tür; örnek; cinsiyet (son ikisi opsiyonel)',
+        style: Theme.of(context).textTheme.bodySmall),
+      const SizedBox(height:6),
+      TextField(controller:bulk, minLines:6, maxLines:10,
+        decoration: const InputDecoration(border: OutlineInputBorder(), hintText:'Çoklu giriş')),
+      const SizedBox(height:6),
+      Align(alignment: Alignment.centerRight, child:
+        FilledButton.icon(icon: const Icon(Icons.upload), label: const Text('Toplu Kelime Yükle'),
+          onPressed:() async{
+            final lines=bulk.text.split('\n').where((e)=>e.trim().isNotEmpty).toList();
+            final list=<Word>[];
+            for(final line in lines){
+              final sep=line.contains(';')?';':',';
+              final p=line.split(sep).map((e)=>e.trim()).toList();
+              if (p.length<3) continue;
+              list.add(Word(
+                bos:p[0], tr:p[1], tur:p[2],
+                example:p.length>3?p[3]:'', gender:p.length>4?p[4]:'',
+              ));
+            }
+            await widget.repo.addWordsBulkSafe(list);
+            _snack(context,'Toplu kelime tamam');
+          }),
+      ),
+    ]);
+  }
+}
+
+// Çeviri formu
+class _TextPairForm extends StatefulWidget{
+  final Repo repo; const _TextPairForm({required this.repo});
+  @override State<_TextPairForm> createState()=>_TextPairFormState();
+}
+class _TextPairFormState extends State<_TextPairForm>{
+  final bos=TextEditingController(), tr=TextEditingController(), bulk=TextEditingController();
+  @override Widget build(BuildContext context){
+    return ListView(padding: const EdgeInsets.all(12), children:[
+      Text('Tekli Metin Ekle', style: Theme.of(context).textTheme.titleMedium),
+      const SizedBox(height:6),
+      TextField(controller:bos, decoration: const InputDecoration(labelText:'Boşnakça')),
+      TextField(controller:tr, decoration: const InputDecoration(labelText:'Türkçe')),
+      const SizedBox(height:6),
+      Align(alignment: Alignment.centerRight, child:
+        FilledButton(onPressed:() async{
+          if (bos.text.trim().isEmpty || tr.text.trim().isEmpty) return;
+          await widget.repo.addTextPair(bos:bos.text.trim(), tr:tr.text.trim());
+          _snack(context,'Metin eklendi'); bos.clear(); tr.clear();
+        }, child: const Text('Metni Ekle')),
+      ),
+      const Divider(height:28),
+      Text('Toplu Metin Ekle (satır: bos; tr)', style: Theme.of(context).textTheme.titleMedium),
+      const SizedBox(height:6),
+      TextField(controller:bulk, minLines:6, maxLines:10,
+        decoration: const InputDecoration(border: OutlineInputBorder(), hintText:'Çoklu giriş')),
+      const SizedBox(height:6),
+      Align(alignment: Alignment.centerRight, child:
+        FilledButton.icon(icon: const Icon(Icons.upload), label: const Text('Toplu Metin Yükle'),
+          onPressed:() async{
+            final lines=bulk.text.split('\n').where((e)=>e.trim().isNotEmpty).toList();
+            final items=<TextPair>[];
+            for(final line in lines){
+              final sep=line.contains(';')?';':',';
+              final p=line.split(sep).map((e)=>e.trim()).toList();
+              if (p.length<2) continue;
+              items.add(TextPair(bos:p[0], tr:p[1]));
+            }
+            await widget.repo.addTextPairsBulk(items);
+            _snack(context,'Toplu metin tamam');
+          }),
+      ),
+    ]);
+  }
+}
+
+// Boşluk Doldurma formu
+class _ClozeForm extends StatefulWidget{
+  final Repo repo; const _ClozeForm({required this.repo});
+  @override State<_ClozeForm> createState()=>_ClozeFormState();
+}
+class _ClozeFormState extends State<_ClozeForm>{
+  final sentence=TextEditingController(), bulk=TextEditingController();
+  String lang='bos';
+  @override Widget build(BuildContext context){
+    return ListView(padding: const EdgeInsets.all(12), children:[
+      Text('Boşluk Doldurma – Tekli', style: Theme.of(context).textTheme.titleMedium),
+      const SizedBox(height:6),
+      TextField(controller:sentence, decoration: const InputDecoration(labelText:'Cümle')),
+      DropdownButtonFormField<String>(
+        value:lang, items: const [
+          DropdownMenuItem(value:'bos', child: Text('Boşnakça')),
+          DropdownMenuItem(value:'tr',  child: Text('Türkçe')),
+        ],
+        onChanged:(v)=>setState(()=>lang=v??'bos'),
+        decoration: const InputDecoration(labelText:'Dil'),
+      ),
+      const SizedBox(height:6),
+      Align(alignment: Alignment.centerRight, child:
+        FilledButton(onPressed:() async{
+          if (sentence.text.trim().isEmpty) return;
+          await widget.repo.addClozeOne(sentence:sentence.text.trim(), lang:lang);
+          _snack(context,'Cümle eklendi'); sentence.clear();
+        }, child: const Text('Cümleyi Ekle')),
+      ),
+      const Divider(height:28),
+      Text('Boşluk Doldurma – Toplu (satır: cümle; dil(bos|tr))',
+          style: Theme.of(context).textTheme.titleMedium),
+      const SizedBox(height:6),
+      TextField(controller:bulk, minLines:6, maxLines:10,
+        decoration: const InputDecoration(border: OutlineInputBorder(), hintText:'Çoklu giriş')),
+      const SizedBox(height:6),
+      Align(alignment: Alignment.centerRight, child:
+        FilledButton.icon(icon: const Icon(Icons.upload), label: const Text('Toplu Yükle'),
+          onPressed:() async{
+            final lines=bulk.text.split('\n').where((e)=>e.trim().isNotEmpty).toList();
+            final items=<Map<String,String>>[];
+            for(final line in lines){
+              final sep=line.contains(';')?';':',';
+              final p=line.split(sep).map((e)=>e.trim()).toList();
+              if (p.isEmpty) continue;
+              final s=p[0]; final l=p.length>1?(p[1].isEmpty?'bos':p[1]):'bos';
+              items.add({'sentence':s,'lang':l});
+            }
+            await widget.repo.addClozeBulk(items);
+            _snack(context,'Toplu cloze tamam');
+          }),
+      ),
+    ]);
+  }
+}
+
+// Padej Alanı — kısa özet + MCQ
+class PadezAlaniPage extends StatefulWidget{ const PadezAlaniPage({super.key});
+  @override State<PadezAlaniPage> createState()=>_PadezAlaniPageState(); }
+class _PadezAlaniPageState extends State<PadezAlaniPage>{
+  final rnd=Random();
+  final rules=[
+    'Akuzativ: koga/šta? – yönelim/nesne. Ör: Vidim (koga?) brata.',
+    'Genitiv: koga/čega? – sahiplik/yokluk/miktar. Ör: Nema (čega?) vremena.',
+    'Dativ: kome/čemu? – yönelme/alıcı. Ör: Pomažem (kome?) prijatelju.',
+    'Lokativ: o kome/čemu? – yer/konu (prepozisyonla). Ör: Govorim o (čemu?) poslu.',
+  ];
+  final questions=<(String,List<String>,int)>[
+    ('Hangi padež nesneyi belirtir?',['Genitiv','Akuzativ','Dativ','Lokativ'],1),
+    ('“Govorim o poslu.” cümlesinde padež?',['Akuzativ','Genitiv','Lokativ','Dativ'],2),
+    ('“Pomažem prijatelju.” cümlesinde padež?',['Dativ','Akuzativ','Genitiv','Lokativ'],0),
+    ('“Nema vremena.” cümlesinde padež?',['Genitiv','Akuzativ','Dativ','Lokativ'],0),
+  ];
+  late (String,List<String>,int) current;
+  @override void initState(){ super.initState(); _pick(); }
+  void _pick(){ current=questions[rnd.nextInt(questions.length)]; setState((){}); }
+
+  @override Widget build(BuildContext context){
+    return Padding(
+      padding: const EdgeInsets.all(16),
+      child: ListView(children:[
+        Text('Kısa Özet', style: Theme.of(context).textTheme.titleLarge),
+        const SizedBox(height:8),
+        for(final r in rules) Padding(padding: const EdgeInsets.only(bottom:6), child: Text('• $r')),
+        const Divider(height:24),
+        Text('Soru', style: Theme.of(context).textTheme.titleLarge),
+        const SizedBox(height:8),
+        Text(current.$1),
+        const SizedBox(height:8),
+        for(int i=0;i<current.$2.length;i++)
+          Padding(padding: const EdgeInsets.symmetric(vertical:6),
+            child: FilledButton.tonal(
+              onPressed: (){
+                final ok=i==current.$3;
+                _snack(context, ok? 'Tačno ✅':'Ne tačno ❌');
+                Future.delayed(const Duration(milliseconds:300), _pick);
+              },
+              child: Padding(padding: const EdgeInsets.all(12), child: Text(current.$2[i])),
+            ),
+          ),
+      ]),
     );
   }
 }
